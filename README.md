@@ -1,6 +1,6 @@
 # Stand Lab
 
-Personal Stand Lab v21 release.
+Personal Stand Lab v22 release.
 
 ## Load
 
@@ -27,7 +27,9 @@ Travel pauses competing automation. Automatic selling and bulk skill allocation 
 
 ## Release status
 
-v21 also waits for Rokakaka's replacement character, character root, both character remotes, and reset Worthiness before learning the node and activating the next Arrow/Rib Cage. Logs identify the exact item-settlement blocker and include server-control state.
+v22 fixes a successful Rib Cage roll becoming stuck at `used-tool-still-equipped`. Once PlayerStats confirms the granted Stand and its dialogue has closed, Stand Lab attempts normal Humanoid unequip once and continues to fresh server skin inspection even if the game retains the rib tool. It never destroys or reactivates the retained rib. The normal equip of Rokakaka handles the following item transition.
+
+Fresh skin validation before Rokakaka and again before its confirmation remains unchanged. The replacement-character, root, both-remotes and reset-Worthiness checks after Rokakaka remain in place. Servers, item collection, and existing diagnostics are preserved.
 
 Compilation and offline dialogue, respawn, server-controller, arrival-bootstrap and UI-adapter checks passed. Live game timing, server-list access and teleports still need testing in the user's runner. Rejoin before loading a new release to clear previous session state.
 

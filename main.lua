@@ -16942,7 +16942,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV21",
+        Name = "StandLabSourceV22",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -16963,7 +16963,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV21",
+            FolderName = "StandLabSourceV22",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27833,7 +27833,7 @@ local function newRollLogCore(header)
             snapshotText = log.Format(state):sub(1, 12000) .. "\n\nOBSERVED INPUT CANDIDATES\n"
                 .. log.Format(log.LastSnapshot.candidates):sub(1, 16000)
         end
-        return "STAND LAB v21 — LOCAL SESSION REPORT\n"
+        return "STAND LAB v22 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
@@ -27952,7 +27952,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v21", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v22", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local function say(message)
         if alive then status:SetDesc(tostring(message)); diagnostics.State("status", tostring(message)) end
@@ -28717,8 +28717,12 @@ local function itemDialogue(itemName, done)
     end, function() return dialogueWakeSignals(revisions) end, 30, itemName .. " dialogue did not complete; stopped.")
 end
 
-local function waitItemSettled(tool, expectWorthinessReset, resetCharacter)
+local function waitItemSettled(tool, expectWorthinessReset, resetCharacter, grantedStand)
+    local unequipAttempted = false
     fastAwait(function()
+        if grantedStand and standName() ~= grantedStand then
+            error("Stand changed while finishing item use; stopped.", 0)
+        end
         local character = player.Character
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
         local reason = nil
@@ -28734,7 +28738,7 @@ local function waitItemSettled(tool, expectWorthinessReset, resetCharacter)
             reason = "missing-character-remotes"
         elseif Gui.currentDialogue() ~= nil then
             reason = "dialogue-still-open"
-        elseif tool and tool.Parent == character then
+        elseif tool and tool.Parent == character and not grantedStand then
             reason = "used-tool-still-equipped"
         end
         if expectWorthinessReset then
@@ -28745,6 +28749,19 @@ local function waitItemSettled(tool, expectWorthinessReset, resetCharacter)
             else
                 diagnostics.State("reset.readiness", "worthiness-reset-confirmed")
             end
+        end
+        -- PlayerStats confirmed the result and the dialogue has closed. A Rib Cage can
+        -- remain equipped after a successful grant, so its Parent is not completion proof.
+        if not reason and grantedStand and tool and tool.Parent == character and not unequipAttempted then
+            unequipAttempted = true
+            diagnostics.Add("item.release.begin", {tool = diagnostics.Path(tool), grantedStand = grantedStand})
+            -- Normal Humanoid unequip; never destroy or reactivate the retained item.
+            local ok, problem = pcall(function() humanoid:UnequipTools() end)
+            diagnostics.Add("item.release.return", {ok = ok, error = not ok and tostring(problem) or nil,
+                toolParent = diagnostics.Path(tool.Parent)}, ok and "INFO" or "WARN")
+            checkCancelled()
+            if player.Character ~= character then return false end
+            if standName() ~= grantedStand then error("Stand changed while finishing item use; stopped.", 0) end
         end
         diagnostics.State("item.settle", reason or "ready", {character = diagnostics.Path(character),
             replacementConfirmed = resetCharacter ~= nil and character ~= resetCharacter,
@@ -28817,7 +28834,8 @@ local function rollUntilSkin()
         say("Preparing " .. itemLabel .. " roll " .. (rolls + 1) .. "...")
         local used, tool = useItem(names, true)
         itemDialogue(used, function() return standName() ~= nil end)
-        waitItemSettled(tool)
+        local grantedStand = standName()
+        waitItemSettled(tool, false, nil, grantedStand)
         rolls += 1
         metrics.rolls = rolls
         say("Roll " .. rolls .. " completed. Waiting for Stand data...")
@@ -29271,7 +29289,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v21 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v22 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
