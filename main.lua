@@ -46,7 +46,7 @@ local PhysicsService = game:GetService("PhysicsService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local MethionSH_Env = type(getgenv) == "function" and getgenv() or _G
-local RELOAD_SCRIPT_RAW_URL = "https://raw.githubusercontent.com/Methions/Yba/refs/heads/main/Methion.V2"
+local RELOAD_SCRIPT_RAW_URL = "https://raw.githubusercontent.com/JeremyInk/stand-lab/main/main.lua"
 local MAIN_AUTOSTART = false
 if MAIN_AUTOSTART then MethionSH_Env.__MethionSHAutoStart = nil end
 
@@ -16942,7 +16942,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV20",
+        Name = "StandLabSourceV21",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -16963,7 +16963,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV20",
+            FolderName = "StandLabSourceV21",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27363,128 +27363,392 @@ Players.PlayerRemoving:Connect(function(plr)
     end)
 end)
 
--- Item Serverhop loader tab. Uses Airflow's built-in Window:Confirm dialog.
-local ITEM_SERVERHOP_URL = "https://raw.githubusercontent.com/Methions/Methion/refs/heads/main/Domain"
-local ItemServerhopTab = Window:Tab({
-    Title = "Item Serverhop",
-    Icon = "server",
-    Desc = "Load the Item Serverhop script.",
-})
-local ItemServerhopSection = ItemServerhopTab:Section({Title = "Script Switch", Side = "left"})
-ItemServerhopSection:Paragraph({
-    Title = "Load Item Serverhop",
-    Desc = "Confirming will close the Methion main UI and load Item Serverhop.",
-})
-
-local itemServerhopLoading = false
-local function loadItemServerhop()
-    if SL_POLICY.Alive then Window:Notify({Title = "Source edition", Content = "External serverhop loaders are disabled in this customized build.", Type = "Info"}); return end
-    if itemServerhopLoading then return end
-    itemServerhopLoading = true
-
-    local fetchOk, source = pcall(function()
-        return game:HttpGet(ITEM_SERVERHOP_URL)
-    end)
-    if not fetchOk or type(source) ~= "string" or source == "" then
-        itemServerhopLoading = false
-        Window:Notify({
-            Title = "Item Serverhop",
-            Content = "Could not download the script. Methion is still open.",
-            Type = "Error",
-            Duration = 5,
-        })
-        return
+local IntegratedServers = (function()
+    -- STAND_LAB_SERVER_CORE
+    -- Uses the inspected hub's public-server endpoint and client teleport protocol.
+-- Network, scheduling, queueing and UI are injected so failure paths can be tested.
+local function newServerController(deps)
+    local self = {alive = true, busy = false, recent = {}, current = nil}
+    for _, id in ipairs(deps.recent or {}) do
+        if type(id) == "string" and id ~= "" then table.insert(self.recent, id) end
     end
-
-    local loader, compileError = loadstring(source)
-    if type(loader) ~= "function" then
-        itemServerhopLoading = false
-        Window:Notify({
-            Title = "Item Serverhop",
-            Content = "Could not compile the script: " .. tostring(compileError),
-            Type = "Error",
-            Duration = 6,
-        })
-        return
+    local function remember(id)
+        if not id or id == "" then return end
+        for i = #self.recent, 1, -1 do if self.recent[i] == id then table.remove(self.recent, i) end end
+        table.insert(self.recent, id)
+        while #self.recent > 30 do table.remove(self.recent, 1) end
     end
-
-    -- Stop the visible automation features before removing the main window.
-    State.Farm = false
-    State.NoClip = false
-    State.ItemTracker = false
-    State.PlayerTracker = false
-    State.PlayerEsp = false
-    State.ItemEsp = false
-    State.HalloweenCandyFarm = false
-    pcall(function() ItemESP.setVisible(false) end)
-    pcall(function()
-        if TrackerESP.Gui and TrackerESP.Gui.Parent then TrackerESP.Gui:Destroy() end
-        TrackerESP.Gui = nil
-        table.clear(TrackerESP.Lines)
-    end)
-    pcall(function() Window:Destroy() end)
-
-    -- The source was downloaded and compiled before closing Methion.
-    local runOk, runError = pcall(loader)
-    if not runOk then
-        warn("[Item Serverhop] Failed to start: " .. tostring(runError))
+    remember(deps.jobId)
+    local function finish(op, message)
+        if self.current ~= op then return end
+        self.current, self.busy = nil, false
+        deps.clearArrival()
+        if deps.finished then deps.finished(op.automatic) end
+        deps.status(message)
     end
-    itemServerhopLoading = false
-end
-
-ItemServerhopSection:Button({
-    Title = "Load Item Serverhop",
-    Desc = "open Item ServerHopper.",
-    Icon = "server",
-    Callback = function()
-        if itemServerhopLoading then return end
-        Window:Confirm({
-            Title = "Load Item Serverhop?",
-            Content = "Loading Item Serverhop will destroy the Methion main UI. Do you want to continue?",
-            Icon = "circle-help",
-            ConfirmText = "Yes, Load",
-            CancelText = "No, Keep Methion",
-            Callback = function()
-                loadItemServerhop()
-            end,
-            OnCancel = function()
-                -- The built-in confirmation closes itself; Methion stays open.
-            end,
-        })
-    end,
-})
-
-local ITEM_SERVERHOP_LOADSTRING = "loadstring(game:HttpGet('https://raw.githubusercontent.com/Methions/Yba/refs/heads/main/MethionServerHopper'))()"
-
-ItemServerhopSection:Button({
-    Title = "Copy Item Serverhop Loadstring",
-    Desc = "Copy the standalone Item Serverhop loader.",
-    Icon = "copy",
-    Callback = function()
-        if type(setclipboard) ~= "function" then
-            Window:Notify({
-                Title = "Item Serverhop",
-                Content = "Clipboard copying is not supported by this executor.",
-                Type = "Warning",
-                Duration = 4,
-            })
+    local function findTargets()
+        local targets, revisits, seen, cursors = {}, {}, {}, {}
+        local visited = {}
+        for _, id in ipairs(self.recent) do visited[id] = true end
+        local cursor = nil
+        for _ = 1, 3 do
+            local page = deps.fetchPage(cursor)
+            if not self.alive then return {} end
+            if type(page) ~= "table" or type(page.data) ~= "table" then error("Server list returned an invalid response", 0) end
+            for _, server in ipairs(page.data) do
+                if type(server) == "table" then
+                    local id, playing, maximum = server.id, tonumber(server.playing), tonumber(server.maxPlayers)
+                    if type(id) == "string" and id ~= "" and id ~= deps.jobId and not seen[id]
+                        and playing and maximum and playing >= 0 and maximum > 0 and playing < maximum then
+                        seen[id] = true
+                        table.insert(visited[id] and revisits or targets, {id = id, playing = playing})
+                    end
+                end
+            end
+            if #targets >= 3 then break end
+            cursor = page.nextPageCursor
+            if type(cursor) ~= "string" or cursor == "" or cursors[cursor] then break end
+            cursors[cursor] = true
+        end
+        if #targets == 0 then targets = revisits end
+        table.sort(targets, function(a,b) return a.playing == b.playing and a.id < b.id or a.playing < b.playing end)
+        local ids = {}
+        for i = 1, math.min(#targets, 3) do ids[i] = targets[i].id end
+        return ids
+    end
+    local attempt
+    function self:Failed(message, targetId, flooded)
+        local op = self.current
+        if not self.alive or not op or not op.target or op.retrying then return end
+        if targetId and targetId ~= "" and targetId ~= op.target then return end
+        op.retrying = true
+        op.failure = tostring(message)
+        deps.status("Teleport failed: " .. op.failure .. ". " .. (op.index < #op.targets and "Trying again..." or "No attempts left."))
+        deps.delay(flooded and 15 or 1, function()
+            if self.alive and self.current == op then attempt(op) end
+        end)
+    end
+    function self:Started()
+        local op = self.current
+        if self.alive and op and op.target then
+            op.started = true
+            deps.status(op.kind == "rejoin" and "Rejoining..." or "Joining another server...")
+        end
+    end
+    attempt = function(op)
+        if not self.alive or self.current ~= op then return end
+        op.index += 1
+        op.retrying, op.started = false, false
+        if op.index > #op.targets then
+            finish(op, (op.kind == "rejoin" and "Rejoin failed: " or "Server hop failed: ") .. tostring(op.failure or "no available server"))
             return
         end
+        op.target = op.targets[op.index]
+        if op.kind == "hop" then remember(op.target) end
+        local prepared, problem = pcall(deps.prepareArrival, op.automatic, self.recent)
+        if not prepared then finish(op, "Could not prepare travel: " .. tostring(problem)); return end
+        if not op.paused then
+            local paused, pauseError = pcall(deps.pauseAutomation)
+            if not paused then finish(op, "Could not pause automation: " .. tostring(pauseError)); return end
+            op.paused = true
+        end
+        if not self.alive or self.current ~= op then return end
+        deps.status((op.kind == "rejoin" and "Rejoin" or "Server hop") .. " requested (attempt " .. op.index .. "/" .. #op.targets .. ").")
+        local index = op.index
+        local accepted, failure = pcall(deps.teleport, op.target)
+        if not accepted then self:Failed(failure, op.target); return end
+        deps.delay(25, function()
+            if self.alive and self.current == op and op.index == index and not op.started and not op.retrying then
+                self:Failed("Roblox did not start the teleport", op.target)
+            end
+        end)
+    end
+    function self:Start(kind, automatic)
+        if not self.alive or self.busy then return false end
+        if kind ~= "hop" and kind ~= "rejoin" then return false end
+        self.busy = true
+        local op = {kind = kind, automatic = automatic == true, index = 0}
+        self.current = op
+        deps.status(kind == "hop" and "Finding available public servers..." or "Preparing rejoin...")
+        deps.spawn(function()
+            local ok, targets = pcall(function()
+                if kind == "rejoin" then
+                    local target = deps.solo() and "" or deps.jobId
+                    return {target, target}
+                end
+                return findTargets()
+            end)
+            if not self.alive or self.current ~= op then return end
+            if not ok then finish(op, "Server lookup failed: " .. tostring(targets)); return end
+            if #targets == 0 then finish(op, "No different public server with space was found. Try again shortly."); return end
+            op.targets = targets
+            attempt(op)
+        end)
+        return true
+    end
+    function self:Stop()
+        if not self.alive then return end
+        self.alive = false
+        if not self.current or not self.current.started or self.current.retrying then deps.clearArrival() end
+        self.current, self.busy = nil, false
+    end
+    return self
+end
 
-        local copied = pcall(setclipboard, ITEM_SERVERHOP_LOADSTRING)
-        Window:Notify({
-            Title = "Item Serverhop",
-            Content = copied and "Loadstring copied to clipboard." or "Could not copy the loadstring.",
-            Type = copied and "Success" or "Warning",
-            Duration = 4,
-        })
-    end,
-})
+    local env = type(getgenv) == "function" and getgenv() or _G
+    local arrival = env.__StandLabServerArrival
+    env.__StandLabServerArrival = nil
+    if type(arrival) ~= "table" or arrival.version ~= 1 or arrival.placeId ~= game.PlaceId then arrival = nil end
+    local queueFunction = env.queue_on_teleport or env.queueonteleport or queue_on_teleport or queueonteleport
+    if type(queueFunction) ~= "function" and type(env.syn) == "table" then queueFunction = env.syn.queue_on_teleport end
+    local canQueue = type(queueFunction) == "function"
+    local alive, autoEnabled, reloadEnabled, queued = true, false, canQueue, false
+    local idleDelay = math.clamp(tonumber(arrival and arrival.idleDelay) or 15, 5, 60)
+    local idleSince, pendingArrival, autoToggle, reloadToggle, controller = nil, nil, nil, nil, nil
+    local tab = Window:Tab({Title = "Servers", Icon = "server", Desc = "Travel and item hopping in Stand Lab."})
+    local travel = tab:Section({Title = "Travel", Side = "left"})
+    local items = tab:Section({Title = "Item hopping", Side = "left"})
+    local overview = tab:Section({Title = "Server status", Side = "right"})
+    local status = overview:Paragraph({Title = "Status", Desc = "Ready."})
+    overview:Paragraph({Title = "Current server", Desc = tostring(game.JobId)})
+    local recent = overview:Paragraph({Title = "Recent activity", Desc = "No travel requested."})
+    local history, lastStatus = {}, nil
+    local function say(message)
+        if not alive or lastStatus == message then return end
+        lastStatus = message
+        status:SetDesc(message)
+        table.insert(history, string.format("%ds  %s", math.floor(os.clock()), message))
+        while #history > 6 do table.remove(history, 1) end
+        recent:SetDesc(table.concat(history, "\n"))
+        print("[Stand Lab Servers] " .. message)
+    end
+    local function setCollector(enabled, candy)
+        State.Farm = enabled and not candy
+        State.HalloweenCandyFarm = enabled and candy == true
+        State.NoClip = enabled
+        pcall(function() AutoFarmToggle:Set(State.Farm, true) end)
+        if enabled then ItemESP.scan() else pcall(FarmVisual.restoreAtSafe) end
+    end
+    local function clearArrival()
+        pendingArrival = nil
+        pcall(function() TeleportService:SetTeleportSetting("StandLabArrival", "") end)
+    end
+    local function saveArrival()
+        if pendingArrival then TeleportService:SetTeleportSetting("StandLabArrival", HttpService:JSONEncode(pendingArrival)) end
+    end
+    local function prepareArrival(automatic, visited)
+        if automatic and (not canQueue or not reloadEnabled) then error("Automatic item hopping needs Reload hub after travel and runner teleport-queue support", 0) end
+        if not canQueue or not reloadEnabled then
+            clearArrival()
+            say("The server will change; run your usual Stand Lab loader after joining.")
+            return
+        end
+        if not pendingArrival then
+            pendingArrival = {version = 1, placeId = game.PlaceId, resumeFarm = State.Farm == true or State.HalloweenCandyFarm == true,
+                candy = State.HalloweenCandyFarm == true, items = table.clone(Config.FarmOnlyItems or {}), mode = Config.FarmTeleportMode,
+                autoHop = autoEnabled, idleDelay = idleDelay}
+        end
+        pendingArrival.recent = table.clone(visited)
+        local saved, saveError = pcall(saveArrival)
+        if not saved then
+            clearArrival()
+            if automatic then error("Could not retain arrival settings: " .. tostring(saveError), 0) end
+            say("Arrival settings unavailable; run the usual loader after joining.")
+            return
+        end
+        if not queued then
+            local source = [========[-- This queued bootstrap reloads the same Stand Lab hub, once per arrival.
+repeat task.wait() until game:IsLoaded()
+local env = type(getgenv) == "function" and getgenv() or _G
+if env.__StandLabArrivalStarted then return end
+local teleport = game:GetService("TeleportService")
+local http = game:GetService("HttpService")
+local ok, encoded = pcall(function() return teleport:GetTeleportSetting("StandLabArrival") end)
+if not ok or type(encoded) ~= "string" or encoded == "" then return end
+local decoded, data = pcall(function() return http:JSONDecode(encoded) end)
+if not decoded or type(data) ~= "table" or data.version ~= 1 or data.placeId ~= game.PlaceId then return end
+env.__StandLabArrivalStarted = true
+pcall(function() teleport:SetTeleportSetting("StandLabArrival", "") end)
+env.__StandLabServerArrival = data
+env.__MethionSHFarmOnlyItems = type(data.items) == "table" and data.items or {}
+env.__MethionSHFarmTeleportMode = data.mode
+-- Retain the inspected hub's PressedPlay command for an unattended arrival.
+if data.resumeFarm then
+    local player = game:GetService("Players").LocalPlayer
+    local character = player.Character or player.CharacterAdded:Wait()
+    local remote = character:WaitForChild("RemoteEvent", 30)
+    if remote then pcall(function() remote:FireServer("PressedPlay") end) end
+end
+local source = game:HttpGet("https://raw.githubusercontent.com/JeremyInk/stand-lab/main/main.lua")
+assert(type(source) == "string" and #source > 0, "Stand Lab download was empty")
+local chunk, problem = loadstring(source)
+assert(type(chunk) == "function", tostring(problem))
+chunk()
+]========]
+            local ok, result = pcall(queueFunction, source)
+            if not ok or result == false then
+                clearArrival()
+                if automatic then error("Your runner could not queue the Stand Lab loader: " .. tostring(result), 0) end
+                say("Automatic reload unavailable; run the usual loader after joining.")
+                return
+            end
+            queued = true
+        end
+    end
+    local function pauseAutomation()
+        local runtime = _G.__StandLabSourceV10
+        if runtime and runtime.CancelRoll then runtime.CancelRoll() end
+        State.Farm, State.HalloweenCandyFarm, State.NoClip, State.Selling = false, false, false, false
+        autoSellMax, autoSellSelected, autoSellAllSelectedLoop = false, false, false
+        autoSellLoopToken += 1
+        Config.AutoBuyLucky = false
+        env.QuestFarmEnabled, env.NPCFarmEnabled = false, false
+        _G.QuestFarmEnabled, _G.NPCFarmEnabled = false, false
+        local ap = _G.MethionAutoPrestige
+        if ap then ap.Enabled = false end
+        pcall(function() AutoFarmToggle:Set(false, true) end)
+        pcall(FarmVisual.cleanup)
+        local deadline = os.clock() + 12
+        while SL_POLICY.RollActive and alive and os.clock() < deadline do task.wait(0.1) end
+        if SL_POLICY.RollActive then error("A Stand request is still finishing. Try travel again once it stops.", 0) end
+    end
+    local function competingAutomation()
+        local ap = _G.MethionAutoPrestige
+        return SL_POLICY.RollActive or State.Selling or State.HalloweenTurnInBusy
+            or env.QuestFarmEnabled or env.NPCFarmEnabled or (ap and (ap.Enabled or ap.Busy))
+    end
+    controller = newServerController({
+        jobId = game.JobId, recent = arrival and arrival.recent,
+        spawn = task.spawn, delay = task.delay, status = say,
+        clearArrival = clearArrival, prepareArrival = prepareArrival, pauseAutomation = pauseAutomation,
+        finished = function(automatic)
+            idleSince = nil
+            if automatic then autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end end
+        end,
+        solo = function() return game.JobId == "" or #Players:GetPlayers() <= 1 end,
+        fetchPage = function(cursor)
+            local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100"
+            if cursor then url ..= "&cursor=" .. HttpService:UrlEncode(cursor) end
+            local body = game:HttpGet(url)
+            if type(body) ~= "string" or body == "" then error("Roblox returned an empty server list", 0) end
+            return HttpService:JSONDecode(body)
+        end,
+        teleport = function(jobId)
+            if jobId == "" then TeleportService:Teleport(game.PlaceId, LP)
+            else TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, LP) end
+        end,
+    })
+    travel:Button({Title = "Server hop", Desc = "Join a different public server with space.", Icon = "shuffle", Callback = function() controller:Start("hop", false) end})
+    travel:Button({Title = "Rejoin", Desc = "Rejoin this server; solo sessions use normal matchmaking.", Icon = "rotate-cw", Callback = function() controller:Start("rejoin", false) end})
+    reloadToggle = travel:Toggle({Title = "Reload hub after travel", Desc = canQueue and "Keeps Stand Lab and your item filters after joining." or "Your runner needs teleport-queue support for automatic reload. Manual travel still works.", Value = canQueue,
+        Callback = function(enabled)
+            if enabled and not canQueue then
+                say("This runner cannot queue a reload. Run the usual loader after joining.")
+                task.defer(function() if reloadToggle then reloadToggle:Set(false, true) end end)
+                return
+            end
+            reloadEnabled = enabled == true
+            if not reloadEnabled then autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end; clearArrival() end
+        end})
+    items:Paragraph({Title = "Selected items", Desc = "Uses your Auto-Farm item filters, or the candy collector when it is active. Selling stays off."})
+    autoToggle = items:Toggle({Title = "Collect + auto hop", Desc = "Collect selected items, then change servers when none remain.", Value = false,
+        Callback = function(enabled)
+            if enabled and (controller.busy or competingAutomation()) then
+                say("Stop the current automation or finish traveling before starting item hopping.")
+                task.defer(function() if autoToggle then autoToggle:Set(false, true) end end)
+                return
+            end
+            if enabled and (not canQueue or not reloadEnabled) then
+                say("Enable Reload hub after travel with a compatible runner before automatic item hopping.")
+                task.defer(function() if autoToggle then autoToggle:Set(false, true) end end)
+                return
+            end
+            autoEnabled, idleSince = enabled == true, nil
+            if autoEnabled then
+                setCollector(true, State.HalloweenCandyFarm == true)
+                say("Collecting selected items. The empty-server timer starts when none are loaded.")
+            else
+                setCollector(false, false)
+                if pendingArrival then pendingArrival.autoHop, pendingArrival.resumeFarm = false, false; pcall(saveArrival) end
+                say("Automatic item hopping stopped.")
+            end
+        end})
+    items:Slider({Title = "Wait when empty (seconds)", Desc = "Allows items and the map to load before hopping.", Value = {Min = 5, Max = 60, Default = idleDelay}, Step = 1,
+        Callback = function(value) idleDelay = math.clamp(tonumber(value) or 15, 5, 60); idleSince = nil end})
+    local failed = TeleportService.TeleportInitFailed:Connect(function(player, result, message, placeId, options)
+        if player ~= LP or placeId ~= game.PlaceId then return end
+        local id = nil
+        if options then pcall(function() id = options.ServerInstanceId end) end
+        controller:Failed(message, id, result == Enum.TeleportResult.Flooded)
+    end)
+    local started = LP.OnTeleport:Connect(function(state)
+        if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then controller:Started() end
+    end)
+    local function readyCharacter()
+        local character = LP.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        return humanoid and humanoid.Health > 0 and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("RemoteFunction")
+    end
+    local function hasSelectedItems()
+        -- Match the collector's real filters without consuming its boosted-target queue.
+        for part, data in pairs(Tracked) do
+            if part and part:IsDescendantOf(workspace) and Utils.validPos(part) and not Utils.invisible(part)
+                and Farm.allowed(data.Name) and not ItemESP.isPlayerOwned(data.Obj, part) then return true end
+        end
+        return false
+    end
+    task.spawn(function()
+        while alive and SL_POLICY.Alive do
+            task.wait(1)
+            if not alive then break end
+            if not autoEnabled or controller.busy or not Farm.isActive() or competingAutomation() or not readyCharacter() then
+                idleSince = nil
+            elseif hasSelectedItems() then
+                idleSince = nil
+            else
+                idleSince = idleSince or os.clock()
+                if os.clock() - idleSince >= idleDelay then
+                    ItemESP.scan()
+                    if hasSelectedItems() then idleSince = nil else controller:Start("hop", true) end
+                end
+            end
+        end
+    end)
+    local api = {}
+    function api:RestoreArrival()
+        if not arrival then return end
+        local data = arrival
+        arrival = nil
+        idleDelay = math.clamp(tonumber(data.idleDelay) or 15, 5, 60)
+        task.spawn(function()
+            local deadline = os.clock() + 45
+            while alive and not readyCharacter() and os.clock() < deadline do task.wait(0.1) end
+            if not alive then return end
+            if not readyCharacter() then say("Hub reloaded. Character is not ready; collection stays stopped."); return end
+            if data.resumeFarm then setCollector(true, data.candy == true) end
+            autoEnabled = data.autoHop == true and canQueue and data.resumeFarm == true
+            autoToggle:Set(autoEnabled, true)
+            say(data.resumeFarm and "Stand Lab reloaded; item collection resumed." or "Stand Lab reloaded. Ready.")
+        end)
+    end
+    function api:Stop()
+        if not alive then return end
+        alive, autoEnabled = false, false
+        controller:Stop()
+        failed:Disconnect()
+        started:Disconnect()
+    end
+    _G.__StandLabSourceV10.GetServerState = function()
+        local current = controller.current
+        return {busy = controller.busy, autoHop = autoEnabled, reloadEnabled = reloadEnabled,
+            queueSupported = canQueue, queued = queued, idleDelay = idleDelay, lastStatus = lastStatus,
+            target = current and current.target, action = current and current.kind,
+            attempt = current and current.index, recentActivity = table.clone(history)}
+    end
+    Window.Raw.Gui.Destroying:Connect(function() api:Stop() end)
+    return api
+end)()
 
-ItemServerhopSection:Paragraph({
-    Title = "Auto Execute Instructions",
-    Desc = "Copy the loadstring and add it to your executor's own Auto Execute feature. It must run automatically when you join the game; otherwise, Item Serverhop will not work as intended.",
-})
 
 local function createRollDiagnostics(header, window, gui)
 local function newRollLogCore(header)
@@ -27569,7 +27833,7 @@ local function newRollLogCore(header)
             snapshotText = log.Format(state):sub(1, 12000) .. "\n\nOBSERVED INPUT CANDIDATES\n"
                 .. log.Format(log.LastSnapshot.candidates):sub(1, 16000)
         end
-        return "STAND LAB v20 — LOCAL SESSION REPORT\n"
+        return "STAND LAB v21 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
@@ -27688,7 +27952,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v20", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v21", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local function say(message)
         if alive then status:SetDesc(tostring(message)); diagnostics.State("status", tostring(message)) end
@@ -28453,24 +28717,44 @@ local function itemDialogue(itemName, done)
     end, function() return dialogueWakeSignals(revisions) end, 30, itemName .. " dialogue did not complete; stopped.")
 end
 
-local function waitItemSettled(tool, expectWorthinessReset)
+local function waitItemSettled(tool, expectWorthinessReset, resetCharacter)
     fastAwait(function()
         local character = player.Character
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local reason = nil
+        if resetCharacter and character == resetCharacter then
+            reason = "waiting-for-replacement-character"
+        elseif not character or not character.Parent then
+            reason = "character-not-parented"
+        elseif not humanoid or humanoid.Health <= 0 then
+            reason = "character-not-alive"
+        elseif not character:FindFirstChild("HumanoidRootPart") then
+            reason = "missing-character-root"
+        elseif not character:FindFirstChild("RemoteEvent") or not character:FindFirstChild("RemoteFunction") then
+            reason = "missing-character-remotes"
+        elseif Gui.currentDialogue() ~= nil then
+            reason = "dialogue-still-open"
+        elseif tool and tool.Parent == character then
+            reason = "used-tool-still-equipped"
+        end
         if expectWorthinessReset then
             local tree = player:FindFirstChild("CharacterSkillTree")
             local worthiness = tree and tree:FindFirstChild("Worthiness")
             if not worthiness or not worthiness:IsA("BoolValue") or worthiness.Value ~= false then
-                diagnostics.State("reset.readiness", "waiting-for-worthiness-reset")
-                return false
+                reason = reason or "waiting-for-worthiness-reset"
+            else
+                diagnostics.State("reset.readiness", "worthiness-reset-confirmed")
             end
-            diagnostics.State("reset.readiness", "worthiness-reset-confirmed")
         end
-        return (not tool or tool.Parent ~= character)
-            and Gui.currentDialogue() == nil and humanoid and humanoid.Health > 0
-            and character:FindFirstChild("RemoteFunction") ~= nil
+        diagnostics.State("item.settle", reason or "ready", {character = diagnostics.Path(character),
+            replacementConfirmed = resetCharacter ~= nil and character ~= resetCharacter,
+            tool = diagnostics.Path(tool), toolParent = diagnostics.Path(tool and tool.Parent),
+            health = humanoid and humanoid.Health})
+        return reason == nil
     end, function()
         local signals = dialogueWakeSignals()
+        local character = player.Character
+        if character then addWakeSignal(signals, character.ChildRemoved) end
         if tool then addWakeSignal(signals, tool.AncestryChanged) end
         if expectWorthinessReset then
             addWakeSignal(signals, player.ChildAdded)
@@ -28485,7 +28769,7 @@ local function waitItemSettled(tool, expectWorthinessReset)
             end
         end
         return signals
-    end, 25, "Waiting for item use or respawn to finish; stopped.")
+    end, 35, "Item use is not ready yet; see Logs > item.settle for the blocking state.")
 end
 
 
@@ -28519,10 +28803,11 @@ local function rollUntilSkin()
                 error("Skin/Stand changed before reset; stopped", 0)
             end
             say("No skin. Using Rokakaka...")
+            local resetCharacter = player.Character
             local used, tool = useItem(FRUIT, false)
             itemDialogue(used, function() return standName() == nil end)
             say("Waiting for Rokakaka reset to finish...")
-            waitItemSettled(tool, true)
+            waitItemSettled(tool, true, resetCharacter)
             waitReady(25)
             if standName() then error("Stand reset wasn't confirmed; stopped", 0) end
         end
@@ -28557,6 +28842,8 @@ diagnostics.Provider = function()
     if busyOk then snapshot.otherAutomationBusy = automationBusy else snapshot.otherAutomationError = tostring(automationBusy) end
     local value = stats and stats:FindFirstChild("Stand")
     snapshot.equippedStand = value and diagnostics.Property(value, "Value") or "<missing>"
+    local serverState = _G.__StandLabSourceV10.GetServerState
+    if serverState then local ok, state = pcall(serverState); if ok then snapshot.servers = state end end
     local skillTree = player:FindFirstChild("CharacterSkillTree")
     local worthiness = skillTree and skillTree:FindFirstChild("Worthiness")
     if worthiness then snapshot.worthiness = diagnostics.Property(worthiness, "Value") else snapshot.worthiness = "<missing>" end
@@ -28804,6 +29091,7 @@ end
         local model, problem = findTargetTemplate(CONFIG.TargetStand)
         previewModel(model, model and (CONFIG.TargetStand .. " / stored template") or problem)
     end})
+    _G.__StandLabSourceV10.CancelRoll = function() cancelled = true end
     _G.__StandLabSourceV10.StopRoll = function() alive, cancelled = false, true end
     gui.Destroying:Connect(function() alive, cancelled, SL_POLICY.RollActive = false, true, false end)
     task.spawn(function()
@@ -28983,7 +29271,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v20 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v21 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
@@ -31471,6 +31759,7 @@ workspace.DescendantAdded:Connect(function(o)
     end
 end)
 
+IntegratedServers:RestoreArrival()
 Rejoin.start()
 if MAIN_AUTOSTART and AutoFarmToggle then
     task.defer(function()
