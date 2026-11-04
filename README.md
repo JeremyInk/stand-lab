@@ -1,6 +1,6 @@
 # Stand Lab
 
-Personal Stand Lab v19 release.
+Personal Stand Lab v20 release.
 
 ## Load
 
@@ -16,7 +16,9 @@ The loader downloads `main.lua` from this repository. Updating that file updates
 
 ## Release status
 
-v19 addresses the observed dialogue handler registration race. The release passed compilation and 31 offline check groups during preparation; the latest fix still needs live testing. Existing diagnostic logging remains available inside the UI.
+v20 waits for Rokakaka's Worthiness reset before learning the node and using another arrow. It also handles late dialogue listeners, stops repeated Continue dispatches caused by typewriter text, reports the game's unworthy rejection immediately, preserves the Stop reason during skin validation, and logs item lookup duration.
+
+The release passed compilation and 39 offline check groups during preparation; these corrections still need live testing. Existing diagnostic logging remains available inside the UI. Rejoin before loading a new release to clear the previous session's game/UI state.
 
 ## Attribution
 

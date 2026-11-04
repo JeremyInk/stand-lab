@@ -16942,7 +16942,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV19",
+        Name = "StandLabSourceV20",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -16963,7 +16963,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV19",
+            FolderName = "StandLabSourceV20",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27569,7 +27569,7 @@ local function newRollLogCore(header)
             snapshotText = log.Format(state):sub(1, 12000) .. "\n\nOBSERVED INPUT CANDIDATES\n"
                 .. log.Format(log.LastSnapshot.candidates):sub(1, 16000)
         end
-        return "STAND LAB v19 — LOCAL SESSION REPORT\n"
+        return "STAND LAB v20 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
@@ -27688,7 +27688,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v19", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v20", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local function say(message)
         if alive then status:SetDesc(tostring(message)); diagnostics.State("status", tostring(message)) end
@@ -27961,8 +27961,10 @@ local function inventoryWakeSignals()
 end
 
 local function waitForTool(names)
+    local trace = diagnostics.Start("inventory.wait", {wanted = names})
     local ok, tool = pcall(fastAwait, function() return findTool(names, player.Character) end,
         inventoryWakeSignals, 8, "Matching item was not available in the live inventory.")
+    diagnostics.Finish(trace, ok and "found" or "error", {path = ok and diagnostics.Path(tool) or nil, error = not ok and tostring(tool) or nil})
     checkCancelled()
     if ok then return tool end
     if tostring(tool) ~= "Matching item was not available in the live inventory." then error(tostring(tool), 0) end
@@ -27988,6 +27990,9 @@ local function useItem(names, isArrow)
         addWakeSignal(signals, tool:GetPropertyChangedSignal("Enabled"))
         return signals
     end, 5, "Item did not become ready to activate.")
+    checkCancelled()
+    -- Equipping can yield; read Worthiness again immediately before activation.
+    if isArrow and not learnWorthiness(1) then return end
     checkCancelled()
     diagnostics.Add("item.activate.begin", {name = tool.Name, parent = diagnostics.Path(tool.Parent)})
     tool:Activate()
@@ -28273,6 +28278,7 @@ local function checkedSkinIsBlank(expectedStand): boolean
         or standName() ~= expectedStand or os.clock() - proof.checkedAt > 20 then setSkinLine(nil); return false end
     -- Requery immediately before fruit and again before confirming its dialogue.
     local ok, fresh = pcall(fetchStandSnapshot)
+    checkCancelled()
     if not ok then setSkinLine(nil); return false end
     setSkinLine(fresh.skin)
     if fresh.skin ~= "" or fresh.stand ~= proof.stand or fresh.createdDate ~= proof.createdDate
@@ -28313,14 +28319,16 @@ end
 
 local function dialogueWakeSignals(revisions)
     local signals = characterWakeSignals()
-    -- Handler registration has no GUI property-change signal. Poll only this pending input once per frame.
-    if pendingInputHandler then
-        if pendingInputHandler.Parent and visible(pendingInputHandler) then
-            addWakeSignal(signals, RunService.Heartbeat, pendingHandlerReady)
-        else
+    -- Subscribe even before a candidate exists: the next predicate can discover it.
+    -- Only inspect a pending handler; do not rescan the GUI on idle frames.
+    addWakeSignal(signals, RunService.Heartbeat, function()
+        if not pendingInputHandler then return false end
+        if not pendingInputHandler.Parent or not visible(pendingInputHandler) then
             pendingInputHandler = nil
+            return true
         end
-    end
+        return pendingHandlerReady()
+    end)
     addWakeSignal(signals, playerGui.ChildAdded)
     addWakeSignal(signals, playerGui.ChildRemoved)
     local stats = player:FindFirstChild("PlayerStats")
@@ -28369,6 +28377,11 @@ local function chooseItemAction(itemName, revisions)
             root = diagnostics.Path(dialogue), visibleTexts = #parts, context = context:sub(1, 700)})
         return nil
     end
+    if (base == "mysteriousarrow" or base == "ribcageofthesaintscorpse")
+        and (context:find("notworthy", 1, true) or context:find("notnotworthy", 1, true)) then
+        diagnostics.Add("dialogue.rejected", {item = itemName, reason = "not-worthy", context = context:sub(1, 700)}, "WARN")
+        error("Game rejected this item: Worthiness is not ready. Stopped.", 0)
+    end
     local accept, advance, seen = nil, nil, {}
     for _, object in ipairs(dialogue:GetDescendants()) do
         if object:IsA("GuiButton") and visible(object) then
@@ -28399,9 +28412,8 @@ local function chooseItemAction(itemName, revisions)
     local revision, current = 0, button
     while current and current ~= playerGui do revision += revisions[current] or 0; current = current.Parent end
     local kind = accept and "accept" or "advance"
-    -- Yes/Accept is dispatched once per appearance. Continue may advance when the page text changes.
+    -- Dispatch once per visible appearance. Typewriter text must not trigger another click.
     local phase = kind .. ":" .. normalizeName(choiceCaption(button)) .. ":" .. revision
-    if kind == "advance" then phase ..= ":" .. context end
     diagnostics.State("dialogue.match", "candidate-ready", {item = itemName, button = diagnostics.Path(button), class = button.ClassName, caption = choiceCaption(button), kind = kind, phase = phase:sub(1, 700)})
     return button, kind, phase
 end
@@ -28441,16 +28453,37 @@ local function itemDialogue(itemName, done)
     end, function() return dialogueWakeSignals(revisions) end, 30, itemName .. " dialogue did not complete; stopped.")
 end
 
-local function waitItemSettled(tool)
+local function waitItemSettled(tool, expectWorthinessReset)
     fastAwait(function()
         local character = player.Character
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if expectWorthinessReset then
+            local tree = player:FindFirstChild("CharacterSkillTree")
+            local worthiness = tree and tree:FindFirstChild("Worthiness")
+            if not worthiness or not worthiness:IsA("BoolValue") or worthiness.Value ~= false then
+                diagnostics.State("reset.readiness", "waiting-for-worthiness-reset")
+                return false
+            end
+            diagnostics.State("reset.readiness", "worthiness-reset-confirmed")
+        end
         return (not tool or tool.Parent ~= character)
             and Gui.currentDialogue() == nil and humanoid and humanoid.Health > 0
             and character:FindFirstChild("RemoteFunction") ~= nil
     end, function()
         local signals = dialogueWakeSignals()
         if tool then addWakeSignal(signals, tool.AncestryChanged) end
+        if expectWorthinessReset then
+            addWakeSignal(signals, player.ChildAdded)
+            addWakeSignal(signals, player.ChildRemoved)
+            local tree = player:FindFirstChild("CharacterSkillTree")
+            if tree then
+                addWakeSignal(signals, tree.ChildAdded)
+                addWakeSignal(signals, tree.ChildRemoved)
+                addWakeSignal(signals, tree.AncestryChanged)
+                local worthiness = tree:FindFirstChild("Worthiness")
+                if worthiness then addWakeSignal(signals, worthiness:GetPropertyChangedSignal("Value")) end
+            end
+        end
         return signals
     end, 25, "Waiting for item use or respawn to finish; stopped.")
 end
@@ -28488,7 +28521,8 @@ local function rollUntilSkin()
             say("No skin. Using Rokakaka...")
             local used, tool = useItem(FRUIT, false)
             itemDialogue(used, function() return standName() == nil end)
-            waitItemSettled(tool)
+            say("Waiting for Rokakaka reset to finish...")
+            waitItemSettled(tool, true)
             waitReady(25)
             if standName() then error("Stand reset wasn't confirmed; stopped", 0) end
         end
@@ -28651,7 +28685,7 @@ diagnostics.Add("session.ready", {getconnections = type(getconnections), firesig
         loopActive, cancelled, SL_POLICY.RollActive = true, false, true
         task.spawn(function()
             local ok, result = diagnostics.Try("roll", rollUntilSkin)
-            say(ok and result or tostring(result))
+            say(cancelled and "Stopped. Already-sent requests may finish." or (ok and result or tostring(result)))
             while alive and inFlight > 0 do task.wait(0.1) end
             loopActive, SL_POLICY.RollActive = false, false
         end)
@@ -28949,7 +28983,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v19 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v20 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
