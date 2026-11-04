@@ -16942,7 +16942,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV22",
+        Name = "StandLabSourceV23",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -16963,7 +16963,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV22",
+            FolderName = "StandLabSourceV23",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27817,7 +27817,9 @@ local function newRollLogCore(header)
     end
     function log.Snapshot(reason)
         if log.Provider then
-            local ok, snapshot = pcall(log.Provider)
+            local ok, snapshot
+            if log.Performance then ok, snapshot = pcall(log.Performance.Measure, log.Performance, "diagnostic-snapshot", log.Provider)
+            else ok, snapshot = pcall(log.Provider) end
             log.LastSnapshot = ok and snapshot or {snapshotError = tostring(snapshot)}
         end
         log.Add("snapshot", {reason = reason or "manual"})
@@ -27833,9 +27835,15 @@ local function newRollLogCore(header)
             snapshotText = log.Format(state):sub(1, 12000) .. "\n\nOBSERVED INPUT CANDIDATES\n"
                 .. log.Format(log.LastSnapshot.candidates):sub(1, 16000)
         end
-        return "STAND LAB v22 — LOCAL SESSION REPORT\n"
+        local performanceText = "Performance recorder not initialized."
+        if log.Performance then
+            local ok, result = pcall(function() return log.Performance:Report() end)
+            performanceText = ok and log.Format(result):sub(1, 24000) or ("Recorder report failed: " .. tostring(result))
+        end
+        return "STAND LAB v23 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
+            .. "\n\nPERFORMANCE / FRAME STALLS\n" .. performanceText
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
             .. "\n\nLATEST DECISION STATES\n" .. log.Format(log.States):sub(1, 8000)
             .. "\n\nSESSION EVENTS\n" .. events
@@ -27852,16 +27860,22 @@ local function newRollLogCore(header)
     end
     function log.Clear()
         log.Entries, log.States, log.Dropped = {}, {}, 0
+        if log.Performance then log.Performance:Clear() end
         log.Add("log.cleared")
     end
     return log
 end
 
 local function attachRollLogUI(log, window, gui)
-    local tab = window:Tab({Title = "Logs", Icon = "file-text", Desc = "Local Stand Rolls diagnostics."})
+    local tab = window:Tab({Title = "Logs", Icon = "file-text", Desc = "Session and performance diagnostics."})
     local actions = tab:Section({Title = "Report", Side = "left"})
     local recent = tab:Section({Title = "Recent events", Side = "right"})
-    actions:Paragraph({Title = "Session log", Desc = "Records decisions and input attempts. Reproduce the issue, then copy the report."})
+    actions:Paragraph({Title = "Session log", Desc = "Records actions, frame stalls and performance samples. After a freeze, copy the report."})
+    actions:Toggle({Title = "Record performance", Desc = "Keeps bounded frame, memory, ping and slow hub-work history. No per-frame world scans.", Value = true,
+        Callback = function(enabled)
+            if log.Performance then log.Performance:SetEnabled(enabled) end
+            log.State("perf.capture", enabled and "enabled" or "disabled")
+        end})
     local preview = recent:Paragraph({Title = "Latest activity", Desc = "Recording this session."})
     local function render()
         if not log.Alive then return end
@@ -27938,6 +27952,206 @@ end
     return log
 end
 
+local function attachPerformanceRecorder(log, gui, readContext)
+    local function newPerformanceRecorder(deps)
+    local self = {enabled = true, alive = true, samples = {}, spikes = {}, work = {}, latest = nil,
+        sampleCount = 0, spikeWindows = 0, worstGapMs = 0, focused = "unknown"}
+    local windowStart, heartbeatAt = deps.now(), nil
+    local frames, renderPeak, heartbeatPeak, slowFrames, pendingContext = 0, 0, 0, 0, nil
+    local lastSpikeEmit, lastSummary, workEmitted = -math.huge, -math.huge, {}
+    local function finite(value) return type(value) == "number" and value == value and value >= 0 and value < math.huge end
+    local function append(list, entry, limit) table.insert(list, entry);if #list > limit then table.remove(list, 1) end end
+    local function context()
+        local ok, value = pcall(deps.context)
+        return ok and value or {contextError = tostring(value)}
+    end
+    local function resetWindow()
+        windowStart, heartbeatAt = deps.now(), nil
+        frames, renderPeak, heartbeatPeak, slowFrames, pendingContext = 0, 0, 0, 0, nil
+    end
+    function self:SetEnabled(enabled)
+        self.enabled = enabled == true
+        resetWindow()
+    end
+    function self:Clear()
+        self.samples, self.spikes, self.work, self.latest = {}, {}, {}, nil
+        self.sampleCount, self.spikeWindows, self.worstGapMs = 0, 0, 0
+        lastSpikeEmit, lastSummary, workEmitted = -math.huge, -math.huge, {}
+        resetWindow()
+    end
+    function self:Frame(dt)
+        if not self.alive or not self.enabled or not finite(dt) then return end
+        frames += 1
+        renderPeak = math.max(renderPeak, dt)
+        if dt >= 0.1 then
+            slowFrames += 1
+            if not pendingContext then pendingContext = context() end
+        end
+    end
+    function self:Heartbeat(dt)
+        if not self.alive or not self.enabled then return false end
+        local now = deps.now()
+        local gap = heartbeatAt and math.max(0, now - heartbeatAt) or 0
+        heartbeatAt = now
+        heartbeatPeak = math.max(heartbeatPeak, gap, finite(dt) and dt or 0)
+        if heartbeatPeak >= 0.1 and not pendingContext then pendingContext = context() end
+        return now - windowStart >= 1
+    end
+    function self:Measure(label, fn, ...)
+        if not self.alive or not self.enabled then return fn(...) end
+        local started = deps.now()
+        local result = table.pack(pcall(fn, ...))
+        local ended = deps.now()
+        if ended - started >= 0.05 then
+            local entry = {task = label, started = started, ended = ended, elapsedMs = (ended-started)*1000,
+                ok = result[1], timing = "elapsed wall time; not per-script CPU time"}
+            append(self.work, entry, 24)
+            if ended - (workEmitted[label] or -math.huge) >= 5 then
+                workEmitted[label] = ended
+                pcall(deps.emit, "perf.slow-hub-work", entry, "WARN")
+            end
+        end
+        if not result[1] then error(result[2], 0) end
+        return table.unpack(result, 2, result.n)
+    end
+    function self:Sample()
+        if not self.alive or not self.enabled then return end
+        local now = deps.now()
+        local elapsed = now-windowStart
+        if elapsed <= 0 then return end
+        local previous = self.latest
+        local ok, metrics = pcall(deps.read)
+        metrics = ok and type(metrics) == "table" and metrics or {metricsUnavailable = true}
+        local sample = {at = now, intervalSeconds = elapsed, fps = frames/elapsed, renderPeakMs = renderPeak*1000,
+            heartbeatGapMs = heartbeatPeak*1000, framesOver100ms = slowFrames, focused = self.focused, metrics = metrics}
+        local peak = math.max(sample.renderPeakMs, sample.heartbeatGapMs)
+        self.worstGapMs = math.max(self.worstGapMs, peak)
+        self.sampleCount += 1
+        self.latest = sample
+        append(self.samples, sample, 90)
+        local before = previous and previous.metrics or {}
+        if peak >= 100 then
+            self.spikeWindows += 1
+            local hints, nearbyWork = {}, {}
+            if self.focused == false then table.insert(hints, "window-unfocused; background throttling may contribute") end
+            if finite(metrics.pingMs) and metrics.pingMs >= 200 then table.insert(hints, "high network latency observed; does not by itself explain a screen freeze") end
+            if finite(metrics.totalMemoryMb) and finite(before.totalMemoryMb) and metrics.totalMemoryMb-before.totalMemoryMb >= 32 then
+                table.insert(hints, "client memory increased near the stall")
+            end
+            if finite(metrics.instanceCount) and finite(before.instanceCount) and metrics.instanceCount-before.instanceCount >= 1000 then
+                table.insert(hints, "instance count increased near the stall")
+            end
+            if finite(metrics.renderCpuFrameRaw) and finite(before.renderCpuFrameRaw) and before.renderCpuFrameRaw > 0
+                and metrics.renderCpuFrameRaw/before.renderCpuFrameRaw >= 2 then
+                table.insert(hints, "sampled CPU rendering time rose relative to previous frame sample")
+            end
+            if finite(metrics.renderGpuFrameRaw) and finite(before.renderGpuFrameRaw) and before.renderGpuFrameRaw > 0
+                and metrics.renderGpuFrameRaw/before.renderGpuFrameRaw >= 2 then
+                table.insert(hints, "sampled GPU rendering time rose relative to previous frame sample")
+            end
+            for i = #self.work, math.max(1,#self.work-5), -1 do
+                local work = self.work[i]
+                if work.ended >= windowStart-1 and work.started <= now and #nearbyWork < 3 then table.insert(nearbyWork, work) end
+            end
+            if #nearbyWork > 0 then table.insert(hints, "slow instrumented hub work occurred near this stall; correlation only") end
+            if #hints == 0 then table.insert(hints, "client frame/scheduler stall observed; exact cause is not established") end
+            local entry = {at = now, peakMs = peak, sample = sample, before = previous, context = pendingContext or context(),
+                nearbyHubWork = nearbyWork, observations = hints}
+            append(self.spikes, entry, 20)
+            if now-lastSpikeEmit >= 5 then
+                lastSpikeEmit = now
+                pcall(deps.emit, "perf.frame-stall", {peakMs = peak, fps = sample.fps, focused = self.focused,
+                    observations = hints, context = entry.context}, "WARN")
+            end
+        elseif now-lastSummary >= 10 then
+            lastSummary = now
+            pcall(deps.emit, "perf.sample", {fps = sample.fps, peakFrameMs = sample.renderPeakMs,
+                pingMs = metrics.pingMs, totalMemoryMb = metrics.totalMemoryMb})
+        end
+        windowStart, frames, renderPeak, heartbeatPeak, slowFrames, pendingContext = now, 0, 0, 0, 0, nil
+    end
+    function self:Report()
+        local recent, stalls, work = {}, {}, {}
+        for i = math.max(1,#self.samples-9),#self.samples do table.insert(recent,self.samples[i]) end
+        for i = math.max(1,#self.spikes-5),#self.spikes do table.insert(stalls,self.spikes[i]) end
+        for i = math.max(1,#self.work-7),#self.work do table.insert(work,self.work[i]) end
+        return {enabled = self.enabled, sampleCount = self.sampleCount, spikeWindows = self.spikeWindows, worstGapMs = self.worstGapMs,
+            latest = self.latest, recentSamples = recent, recentStalls = stalls, slowHubWork = work,
+            note = "Stalls are recorded after execution resumes. Observations are correlations, not proven causes. Engine metrics are sampled after the gap and may miss its peak. CPU/GPU engine frame values are kept raw; they are not whole-machine utilization. No per-script CPU profile is collected."}
+    end
+    function self:Stop() self.alive = false end
+    return self
+end
+
+    local stats = nil
+    pcall(function() stats = game:GetService("Stats") end)
+    local recorder, sampleQueued, connections = nil, false, {}
+    local origin = log.Started or os.clock()
+    local function number(read)
+        local ok, value = pcall(read)
+        if ok and type(value) == "number" and value == value and value >= 0 and value < math.huge then return value end
+        return nil
+    end
+    recorder = newPerformanceRecorder({
+        now = function() return os.clock()-origin end,
+        context = readContext,
+        emit = function(event, fields, level) log.Add(event, fields, level) end,
+        read = function()
+            local started = os.clock()
+            local metrics = {}
+            if stats then
+                metrics.totalMemoryMb = number(function() return stats:GetTotalMemoryUsageMb() end)
+                metrics.instanceCount = number(function() return stats.InstanceCount end)
+                metrics.engineFrameMs = number(function() return stats.FrameTime*1000 end)
+                metrics.renderCpuFrameRaw = number(function() return stats.RenderCPUFrameTime end)
+                metrics.renderGpuFrameRaw = number(function() return stats.RenderGPUFrameTime end)
+                metrics.physicsStepSeconds = number(function() return stats.PhysicsStepTime end)
+                metrics.receiveKbps = number(function() return stats.DataReceiveKbps end)
+                metrics.sendKbps = number(function() return stats.DataSendKbps end)
+            end
+            metrics.pingMs = number(function() return LP:GetNetworkPing()*1000 end)
+            metrics.luaHeapMb = number(function() return gcinfo()/1024 end)
+            local unavailable = {}
+            for _, name in ipairs({"totalMemoryMb", "instanceCount", "engineFrameMs", "renderCpuFrameRaw", "renderGpuFrameRaw", "physicsStepSeconds", "receiveKbps", "sendKbps", "pingMs", "luaHeapMb"}) do
+                if metrics[name] == nil then table.insert(unavailable, name) end
+            end
+            if #unavailable > 0 then metrics.unavailable = unavailable end
+            metrics.monitorReadMs = (os.clock()-started)*1000
+            return metrics
+        end,
+    })
+    log.Performance = recorder
+    local function connect(signal, callback)
+        local ok, connection = pcall(function() return signal:Connect(callback) end)
+        if ok then table.insert(connections, connection) end
+    end
+    connect(RunService.RenderStepped, function(dt) recorder:Frame(dt) end)
+    connect(RunService.Heartbeat, function(dt)
+        if recorder:Heartbeat(dt) and not sampleQueued then
+            sampleQueued = true
+            task.defer(function()
+                sampleQueued = false
+                if recorder.alive and log.Alive then
+                    local ok, problem = pcall(function() recorder:Sample() end)
+                    if not ok then recorder:SetEnabled(false);log.Add("perf.recorder-error", {error = tostring(problem)}, "WARN") end
+                end
+            end)
+        end
+    end)
+    connect(UserInputService.WindowFocusReleased, function() recorder.focused = false end)
+    connect(UserInputService.WindowFocused, function() recorder.focused = true end)
+    local scan = ItemESP.scan
+    local wrappedScan = function(...) return recorder:Measure("item-world-scan", scan, ...) end
+    ItemESP.scan = wrappedScan
+    connect(gui.Destroying, function()
+        recorder:Stop()
+        for _, connection in ipairs(connections) do connection:Disconnect() end
+        if ItemESP.scan == wrappedScan then ItemESP.scan = scan end
+    end)
+    return recorder
+end
+
+
 local function setupStandLabRolls()
     local player = LP
     local playerGui = player:WaitForChild("PlayerGui")
@@ -27952,8 +28166,16 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v22", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v23", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
+    local performance = attachPerformanceRecorder(diagnostics, gui, function()
+        local statusState = diagnostics.States.status
+        local settleState = diagnostics.States["item.settle"]
+        return {status = statusState and statusState.reason, settle = settleState and settleState.reason,
+            item = diagnostics.ActiveItem, rollActive = loopActive, serverRequestsInFlight = inFlight,
+            itemFarm = State.Farm, candyFarm = State.HalloweenCandyFarm, selling = State.Selling,
+            esp = State.ItemEsp or State.PlayerEsp, hubVisible = gui.Enabled}
+    end)
     local function say(message)
         if alive then status:SetDesc(tostring(message)); diagnostics.State("status", tostring(message)) end
     end
@@ -28529,7 +28751,7 @@ local function fetchStandSnapshot()
         createdDate = data.CreatedDate, originalOwner = data.OriginalOwner, checkedAt = os.clock(),
     }
     -- Preview failure must not change the authoritative StandData result.
-    local previewOk, preview = pcall(keepStandPreview, response.StandModel, data)
+    local previewOk, preview = pcall(performance.Measure, performance, "stand-preview-build", keepStandPreview, response.StandModel, data)
     if previewOk then snapshot.model = preview else releaseReturnedModel(response.StandModel) end
     latestStandSnapshot = snapshot
     return snapshot
@@ -29289,7 +29511,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v22 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v23 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})

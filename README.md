@@ -1,6 +1,6 @@
 # Stand Lab
 
-Personal Stand Lab v22 release.
+Personal Stand Lab v23 release.
 
 ## Load
 
@@ -27,7 +27,18 @@ Travel pauses competing automation. Automatic selling and bulk skill allocation 
 
 ## Release status
 
-v22 fixes a successful Rib Cage roll becoming stuck at `used-tool-still-equipped`. Once PlayerStats confirms the granted Stand and its dialogue has closed, Stand Lab attempts normal Humanoid unequip once and continues to fresh server skin inspection even if the game retains the rib tool. It never destroys or reactivates the retained rib. The normal equip of Rokakaka handles the following item transition.
+v23 adds local performance recording to **Logs → Copy report**. Keep **Record performance** on, reproduce a spike, and copy the report after the game responds again.
+
+- Frame/scheduler gaps of 100 ms or more, average sampled FPS, and worst observed gap.
+- Client memory, Lua heap, instance count, network ping, network throughput, and available engine rendering/physics measurements. Unsupported readings are listed as unavailable. CPU/GPU rendering values remain in engine-native units; they are not whole-machine utilization.
+- Before/after samples, active hub features and pending server request count around a stall.
+- Slow item-world scans, Stand preview builds and report snapshots, with elapsed time. Elapsed time can include yields and is not a per-script CPU profile.
+
+Normal frame callbacks update counters only. Metrics are read once per second; recording does not initiate world scans or HTTP requests. Storage is capped at 90 samples, 20 stall windows and 24 slow-work records. Reports include the latest 10 samples, 6 stall windows and 8 slow-work records; spike event output is throttled. Closing the hub disconnects the monitor, and **Clear log** clears its history.
+
+Stalls can only be recorded after execution resumes. Cause hints are correlations, not proof of a specific script, garbage collector, driver or hardware fault. The metrics use Roblox's [Stats service](https://create.roblox.com/docs/reference/engine/classes/Stats) and [local-player network ping](https://create.roblox.com/docs/reference/engine/classes/Player#GetNetworkPing). Data stays in local memory until you choose to copy it; nothing is uploaded automatically.
+
+The v22 retained-Rib correction is preserved: a confirmed Stand result proceeds to fresh skin inspection even when the game leaves the rib equipped. Normal unequip is attempted once without destroying or reactivating the item.
 
 Fresh skin validation before Rokakaka and again before its confirmation remains unchanged. The replacement-character, root, both-remotes and reset-Worthiness checks after Rokakaka remain in place. Servers, item collection, and existing diagnostics are preserved.
 
