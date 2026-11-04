@@ -16689,10 +16689,174 @@ pcall(function()
     AirflowLibrary:PreloadIcons()
 end)
 
+local Preferences = (function()
+    local function newPreferenceStore(deps)
+    local self = {values = {}, ready = false, bindings = {}, pending = false, dirty = false, status = "Loading preferences...", generation = 0}
+    local function clean(value, depth)
+        depth = depth or 0
+        local kind = type(value)
+        if kind == "string" then return value:sub(1,4096) end
+        if kind == "boolean" then return value end
+        if kind == "number" and value == value and math.abs(value)<math.huge then return value end
+        if kind ~= "table" or depth >= 4 then return nil end
+        local copy, count = {}, 0
+        for key, child in pairs(value) do
+            if type(key)=="string" or (type(key)=="number" and key>=1 and key%1==0) then
+                local saved=clean(child,depth+1)
+                if saved~=nil then copy[key]=saved;count+=1 end
+                if count>=512 then break end
+            end
+        end
+        return copy
+    end
+    local function status(message)
+        self.status=message
+        if self.OnStatus then pcall(self.OnStatus,message) end
+    end
+    local function decode(text)
+        local ok,data=pcall(deps.decode,text)
+        if ok and type(data)=="table" and data.version==1 and type(data.values)=="table" then return clean(data.values) end
+        return nil
+    end
+    local loaded=false
+    if deps.read then
+        local ok,text=pcall(deps.read,false)
+        local values=ok and type(text)=="string" and decode(text) or nil
+        if values then self.values=values;loaded=true
+        else
+            local backupOk,backup=pcall(deps.read,true)
+            values=backupOk and type(backup)=="string" and decode(backup) or nil
+            if values then self.values=values;loaded=true;status("Recovered saved preferences from backup.") end
+        end
+    end
+    if not loaded and type(deps.memory)=="table" then self.values=clean(deps.memory) or {} end
+    if self.status=="Loading preferences..." then status(deps.write and (loaded and "Saved preferences loaded." or "Autosave ready.") or "Session memory only: runner file access is unavailable.") end
+    function self:Get(key, fallback)
+        local value=self.values[key]
+        if value==nil then return fallback end
+        return clean(value)
+    end
+    function self:Flush()
+        self.generation+=1;self.pending=false
+        if not self.dirty then return true end
+        deps.remember(clean(self.values))
+        if not deps.write then status("Session memory only: changes will not survive rejoining.");return false end
+        local encodedOk,encoded=pcall(deps.encode,{version=1,values=self.values})
+        if not encodedOk or type(encoded)~="string" or #encoded>262144 then status("Could not encode preferences; changes remain in memory.");return false end
+        local ok,problem=pcall(deps.write,encoded)
+        if not ok or problem==false then status("Could not save preferences: "..tostring(problem));return false end
+        self.dirty=false;status("Saved automatically.");return true
+    end
+    function self:Set(key,value)
+        value=clean(value)
+        if value==nil then return end
+        self.values[key]=value;self.dirty=true
+        deps.remember(clean(self.values))
+        if not self.ready or self.pending then return end
+        status(deps.write and "Saving preferences..." or "Session memory only: changes will not survive rejoining.")
+        self.pending=true;self.generation+=1
+        local generation=self.generation
+        deps.delay(0.5,function() if self.pending and self.generation==generation then self:Flush() end end)
+    end
+    function self:Restore()
+        for _,binding in ipairs(self.bindings) do
+            if binding.saved~=nil then
+                local ok,problem=pcall(function()
+                    if binding.control and binding.control.Set then binding.control:Set(binding.saved,true) end
+                    if binding.callback then binding.callback(binding.saved) end
+                end)
+                if not ok then status("A saved preference could not be applied: "..tostring(problem)) end
+            end
+        end
+        self.ready=true
+        if self.dirty then self:Flush() end
+    end
+    return self
+end
+
+    local env = type(getgenv)=="function" and getgenv() or _G
+    local key = tostring(Players.LocalPlayer.UserId)
+    local path = "StandLab/settings-"..key..".json"
+    env.__StandLabPreferenceMemory = env.__StandLabPreferenceMemory or {}
+    local cached = env.__StandLabPreferenceMemory
+    local canRead, canWrite = type(readfile)=="function", type(writefile)=="function"
+    local lastGood = nil
+    local store = newPreferenceStore({
+        memory = cached[key], delay = task.delay,
+        remember = function(values) cached[key]=values end,
+        encode = function(value) return HttpService:JSONEncode(value) end,
+        decode = function(value) return HttpService:JSONDecode(value) end,
+        read = canRead and function(backup)
+            local text=readfile(path..(backup and ".bak" or ""))
+            local decoded=HttpService:JSONDecode(text)
+            if decoded.version==1 and type(decoded.values)=="table" then lastGood=text end
+            return text
+        end or nil,
+        write = canWrite and function(encoded)
+            if type(makefolder)=="function" then
+                if type(isfolder)~="function" or not isfolder("StandLab") then pcall(makefolder,"StandLab") end
+            end
+            if lastGood then pcall(writefile,path..".bak",lastGood) end
+            local result=writefile(path,encoded)
+            if result==false then error("Runner rejected the settings write",0) end
+            if canRead and readfile(path)~=encoded then error("Settings file did not verify after saving",0) end
+            lastGood=encoded
+        end or nil,
+    })
+    function store:Bind(config,kind,scope)
+        local title=config.Title or config.Name or ""
+        local allowed=not config.NoSave and (scope:match("^Auto%-Farm") or scope:match("^Stand Rolls") or scope:match("^Settings")
+            or scope:match("^Selling") or scope:match("^ESP") or scope:match("^Weather") or scope:match("^Servers")
+            or scope:match("^Logs") or scope:match("^Halloween Event"))
+        if kind=="Toggle" then
+            allowed=allowed and (scope:match("^ESP") or scope:match("^Weather") or title=="Boosted" or title=="Show advanced pages"
+                or title=="Record performance" or title=="Reload hub after travel")
+        end
+        if not allowed then return config,function() end end
+        local id=scope.."/"..title
+        local saved=self:Get(id)
+        if kind=="Toggle" and type(saved)~="boolean" then saved=nil end
+        if kind=="Slider" and type(saved)~="number" then saved=nil end
+        if kind=="Slider" and saved then
+            local range=config.Value or {}
+            saved=math.clamp(saved,range.Min or config.Min or 0,range.Max or config.Max or 100)
+        end
+        if kind=="Input" and type(saved)~="string" then saved=nil end
+        if kind=="Dropdown" and type(saved)~="string" and type(saved)~="table" then saved=nil end
+        if kind=="ColorPicker" then
+            if type(saved)=="table" and type(saved[1])=="number" and type(saved[2])=="number" and type(saved[3])=="number" then
+                saved=Color3.new(math.clamp(saved[1],0,1),math.clamp(saved[2],0,1),math.clamp(saved[3],0,1))
+            else saved=nil end
+        end
+        local options=table.clone(config)
+        if saved~=nil then
+            if kind=="Slider" then options.Value=table.clone(config.Value or {});options.Value.Default=saved
+            else options.Value=saved end
+        end
+        local original=config.Callback
+        local binding={callback=original,saved=saved}
+        options.Callback=function(value,...)
+            if original then original(value,...) end
+            if not self.ready then return end
+            local current=value
+            if binding.control and binding.control.Get then
+                local ok,result=pcall(function() return binding.control:Get() end)
+                if ok and result~=nil then current=result end
+            end
+            if kind=="ColorPicker" then current={current.R,current.G,current.B} end
+            self:Set(id,current)
+        end
+        return options,function(control) binding.control=control;table.insert(self.bindings,binding) end
+    end
+    return store
+end)()
+
+
 local AirflowCompat = {}
 local CompatWindow = nil
 
-local function adaptTab(rawTab)
+local function adaptTab(rawTab, scope)
+    scope = scope or rawTab.Name or "Tab"
     local tab = {}
 
     function tab:Section(config)
@@ -16703,7 +16867,7 @@ local function adaptTab(rawTab)
             Collapsible = config.Collapsible,
             Collapsed = config.Collapsed,
         })
-        return adaptTab(section)
+        return adaptTab(section, scope.."/"..(config.Title or config.Name or "Section"))
     end
 
     local function writeText(target, text, oldText, depth, seen)
@@ -16749,7 +16913,9 @@ local function adaptTab(rawTab)
 
     function tab:Toggle(config)
         config = config or {}
-        return rawTab:Toggle({
+        local registerPreference
+        config, registerPreference = Preferences:Bind(config,"Toggle",scope)
+        local preferenceControl = rawTab:Toggle({
             Name = config.Title or config.Name or "Toggle",
             Desc = config.Desc or "",
             Default = config.Value == true,
@@ -16758,10 +16924,14 @@ local function adaptTab(rawTab)
             LockedReason = config.LockedReason or "Premium",
             Callback = config.Callback,
         })
+        registerPreference(preferenceControl)
+        return preferenceControl
     end
 
     function tab:Dropdown(config)
         config = config or {}
+        local registerPreference
+        config, registerPreference = Preferences:Bind(config,"Dropdown",scope)
         local element = rawTab:Dropdown({
             Name = config.Title or config.Name or "Dropdown",
             Desc = config.Desc or "",
@@ -16773,6 +16943,7 @@ local function adaptTab(rawTab)
             Callback = config.Callback,
         })
 
+        registerPreference(element)
         local initialValue = config.Value ~= nil and config.Value or config.Default
         local wrapped = {
             Raw = element,
@@ -16823,8 +16994,10 @@ local function adaptTab(rawTab)
 
     function tab:Slider(config)
         config = config or {}
+        local registerPreference
+        config, registerPreference = Preferences:Bind(config,"Slider",scope)
         local range = config.Value or {}
-        return rawTab:Slider({
+        local preferenceControl = rawTab:Slider({
             Name = config.Title or config.Name or "Slider",
             Desc = config.Desc or "",
             Min = range.Min or config.Min or 0,
@@ -16834,17 +17007,23 @@ local function adaptTab(rawTab)
             Suffix = config.Suffix,
             Callback = config.Callback,
         })
+        registerPreference(preferenceControl)
+        return preferenceControl
     end
 
     function tab:ColorPicker(config)
         config = config or {}
-        return rawTab:ColorPicker({
+        local registerPreference
+        config, registerPreference = Preferences:Bind(config,"ColorPicker",scope)
+        local preferenceControl = rawTab:ColorPicker({
             Name = config.Title or config.Name or "Color",
             Desc = config.Desc or "",
             Default = config.Value or config.Default or Color3.new(1, 1, 1),
             Flag = config.Flag,
             Callback = config.Callback,
         })
+        registerPreference(preferenceControl)
+        return preferenceControl
     end
 
     function tab:Button(config)
@@ -16860,13 +17039,17 @@ local function adaptTab(rawTab)
 
     function tab:Input(config)
         config = config or {}
-        return rawTab:Input({
+        local registerPreference
+        config, registerPreference = Preferences:Bind(config,"Input",scope)
+        local preferenceControl = rawTab:Input({
             Name = config.Title or config.Name or "Input",
             Desc = config.Desc or "",
             Placeholder = config.Placeholder or "",
             Default = config.Value ~= nil and config.Value or config.Default or "",
             Callback = config.Callback,
         })
+        registerPreference(preferenceControl)
+        return preferenceControl
     end
 
     function tab:Paragraph(config)
@@ -16942,7 +17125,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV23",
+        Name = "StandLabSourceV24",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -16963,7 +17146,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV23",
+            FolderName = "StandLabSourceV24",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -16988,7 +17171,7 @@ function AirflowCompat:CreateWindow(config)
                 if rawTab._button.Visible and not SL_POLICY.ShowAdvanced then rawTab._button.Visible = false end
             end)
         end
-        return adaptTab(rawTab)
+        return adaptTab(rawTab, options.Title or options.Name or "Tab")
     end
 
     function window:Notify(options)
@@ -22935,6 +23118,7 @@ local HalloweenTab = Window:Tab({
     Desc = "Collect candy and turn it in to Jack.",
 })
 
+local CandyAudit = nil
 local Halloween = {
     AutoTurnIn = false,
     TurnInThreshold = 20,
@@ -22968,11 +23152,15 @@ function Halloween.captureJackPoints(gui)
     if not ok or type(rawText) ~= "string" or rawText == "" then return false end
 
     local text = string.lower(rawText):gsub(",", "")
-    local digits = text:match("you%s+now%s+have%s+(%d+)%s+points?")
+    if not text:find("jack",1,true) and not text:find("cauldron specter",1,true) then return false end
+    local digits = text:match("you%s+now%s+have%s+(%d+)%s+points?") or text:match("you%s+currently%s+have%s+(%d+)%s+points?")
     if not digits then return false end
 
     local points = tonumber(digits)
     if not points then return false end
+    if CandyAudit and Halloween.CachedJackPoints and points<Halloween.CachedJackPoints then
+        CandyAudit.Add("points-decreased",{before=Halloween.CachedJackPoints,after=points})
+    end
     Halloween.CachedJackPoints = points
     return true
 end
@@ -23005,7 +23193,7 @@ function Halloween.readJackPoints()
     end
 
     local bestValue = Halloween.CachedJackPoints
-    local bestScore = bestValue ~= nil and 1000 or -1
+    local bestScore = bestValue ~= nil and 10 or -1
     local scanRoots = {LP}
     for _, rootName in ipairs({"PlayerStats", "leaderstats", "Stats", "Data"}) do
         local root = LP:FindFirstChild(rootName)
@@ -23016,7 +23204,8 @@ function Halloween.readJackPoints()
     for _, root in ipairs(scanRoots) do
         if root and not seen[root] then
             seen[root] = true
-            for _, obj in ipairs(root:GetDescendants()) do
+            local statObjects = root==LP and root:GetChildren() or root:GetDescendants()
+            for _, obj in ipairs(statObjects) do
                 if obj:IsA("ValueBase") then
                     local key = normalize(obj.Name)
                     local score = aliases[key]
@@ -23083,6 +23272,74 @@ local function halloweenNotify(title, message, notificationType)
     end)
 end
 
+CandyAudit = (function()
+    local self={events={}}
+    local function key(text) return tostring(text):lower():gsub("<[^>]*>",""):gsub("[^%w]","") end
+    local function caption(button)
+        if button:IsA("TextButton") and button.Text:match("%S") then return button.Text end
+        for _,child in ipairs(button:GetDescendants()) do if child:IsA("TextLabel") and child.Text:match("%S") then return child.Text end end
+        return ""
+    end
+    function self.Add(event,fields)
+        local entry={at=tick(),event=event,fields=fields}
+        table.insert(self.events,entry);if #self.events>24 then table.remove(self.events,1) end
+        local write=_G.__StandLabSourceV10 and _G.__StandLabSourceV10.LogEvent
+        if write then write("candy."..event,fields) end
+    end
+    local function jack(gui)
+        local text=key(Gui.dialogueText(gui))
+        return text:find("jack",1,true)~=nil or text:find("cauldronspecter",1,true)~=nil
+    end
+    local function find(gui,wanted)
+        if not gui or not Gui.dialogueActive(gui) or not jack(gui) then return nil end
+        local found=nil
+        for _,button in ipairs(gui:GetDescendants()) do
+            if button:IsA("GuiButton") and Gui.isVisible(button) and wanted[key(caption(button))] then
+                if found and found~=button then return nil end
+                found=button
+            end
+        end
+        return found
+    end
+    local function ready(button)
+        if type(getconnections)~="function" then return true end
+        local ok,connections=pcall(function() return getconnections(button.MouseButton1Click) end)
+        if not ok or type(connections)~="table" then return true end
+        for _,connection in pairs(connections) do
+            local enabledOk,enabled=pcall(function() return connection.Enabled end)
+            local connectedOk,connected=pcall(function() return connection.Connected end)
+            if (not enabledOk or enabled~=false) and (not connectedOk or connected~=false) then return true end
+        end
+        return false
+    end
+    function self.ClickChoice(gui,wanted,timeout,reason)
+        local deadline=tick()+timeout
+        while tick()<deadline do
+            if not SL_POLICY.Alive then return false end
+            if Gui.currentDialogue()~=gui then return false end
+            local button=find(gui,wanted)
+            if button and ready(button) then
+                self.Add("choice",{reason=reason,caption=caption(button)})
+                return Gui.click(button)
+            end
+            task.wait()
+        end
+        self.Add("choice-not-found",{reason=reason})
+        return false
+    end
+    function self.TurnIn(gui)
+        return self.ClickChoice(gui,{iwanttoturninmycandy=true},5,"turn-in-candy")
+    end
+    function self.Close(gui)
+        return self.ClickChoice(gui,{imgonnagonow=true,goodbye=true,close=true,exit=true},2,"leave-jack")
+    end
+    _G.__StandLabSourceV10.GetCandyAudit=function()
+        return {points=Halloween.CachedJackPoints,events=table.clone(self.events),note="Balance decreases are observations; they do not by themselves identify the cause."}
+    end
+    return self
+end)()
+
+
 local function turnInHalloweenCandies()
     if Halloween.TurnInBusy or State.HalloweenTurnInBusy then
         return false, "A candy turn-in is already running."
@@ -23122,8 +23379,9 @@ local function turnInHalloweenCandies()
         end
         openedDialogue = dialogue
 
-        if not Gui.waitAndClickOption("Option2", 5) then
-            failureReason = "The second dialogue option was not available."
+        CandyAudit.Add("turn-in-begin",{candies=candyCount,points=Halloween.readJackPoints()})
+        if not CandyAudit.TurnIn(dialogue) then
+            failureReason = "Jack's exact candy turn-in choice was not found. No points option was selected."
             return
         end
 
@@ -23140,10 +23398,11 @@ local function turnInHalloweenCandies()
 
     if openedDialogue then
         pcall(function()
-            Gui.forceCloseDialogue(3)
+            CandyAudit.Close(openedDialogue)
         end)
     end
 
+    CandyAudit.Add("turn-in-end",{requested=success,candies=Halloween.countCandies(),points=Halloween.readJackPoints()})
     Halloween.TurnInBusy = false
     State.HalloweenTurnInBusy = false
 
@@ -23221,8 +23480,9 @@ HalloweenTurnInSection:Button({
 })
 task.spawn(function()
     local lastStatusUpdate = 0
-    while true do
+    while SL_POLICY.Alive do
         task.wait(0.4)
+        if not SL_POLICY.Alive then break end
 
         local activeDialogue = Gui.currentDialogue()
         if activeDialogue then
@@ -27537,6 +27797,7 @@ end
         if pendingArrival then TeleportService:SetTeleportSetting("StandLabArrival", HttpService:JSONEncode(pendingArrival)) end
     end
     local function prepareArrival(automatic, visited)
+        Preferences:Flush()
         if automatic and (not canQueue or not reloadEnabled) then error("Automatic item hopping needs Reload hub after travel and runner teleport-queue support", 0) end
         if not canQueue or not reloadEnabled then
             clearArrival()
@@ -27840,7 +28101,7 @@ local function newRollLogCore(header)
             local ok, result = pcall(function() return log.Performance:Report() end)
             performanceText = ok and log.Format(result):sub(1, 24000) or ("Recorder report failed: " .. tostring(result))
         end
-        return "STAND LAB v23 — LOCAL SESSION REPORT\n"
+        return "STAND LAB v24 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
             .. "\n\nPERFORMANCE / FRAME STALLS\n" .. performanceText
@@ -28159,14 +28420,23 @@ local function setupStandLabRolls()
     local alive, busy, loopActive, cancelled = true, false, false, false
     local inFlight = 0
     local metrics = {rolls = 0}
-    local CONFIG = {RollItem = "Arrow", TargetStand = "", MaxRolls = 0}
+    local CONFIG = {
+        RollItem = Preferences:Get("Stand Rolls/Roll controls/Roll item")=="Rib Cage of The Saint's Corpse" and "Rib" or "Arrow",
+        TargetStand = Preferences:Get("Stand Rolls/Roll controls/Stop at Stand", ""),
+        MaxRolls = math.clamp(tonumber(Preferences:Get("Stand Rolls/Roll controls/Roll limit")) or 0,0,10000),
+        SkinMode = Preferences:Get("Stand Rolls/Skin targets/Skin rule")=="Keep selected skins" and "Selected" or "Any",
+        TargetSkins = Preferences:Get("Stand Rolls/Skin targets/Skins to keep",{}),
+    }
+    if type(CONFIG.TargetSkins)~="table" then CONFIG.TargetSkins={} end
+    if type(CONFIG.TargetStand)~="string" or CONFIG.TargetStand=="Any Stand / skin only" then CONFIG.TargetStand="" end
+
     local _targetLevel = 1
     local SKILLS = {"Worthiness"}
     local tab = Window:Tab({Title = "Stand Rolls", Icon = "sparkles", Desc = "Selected Stand or any skin. No automatic selling or bulk skill allocation."})
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v23", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v24", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local performance = attachPerformanceRecorder(diagnostics, gui, function()
         local statusState = diagnostics.States.status
@@ -28757,18 +29027,193 @@ local function fetchStandSnapshot()
     return snapshot
 end
 
-local function checkedSkinIsBlank(expectedStand): boolean
+local SKIN_CATALOG = {
+    "Action Figure",
+    "Actually Red Hot Chili Pepper",
+    "Aerosleigh",
+    "Aerosmith Over Heaven",
+    "All Star The Hand",
+    "All Star Whitesnake",
+    "Anti Umbral",
+    "Asuna",
+    "Biblically Accurate Experience",
+    "Blade of the Exile",
+    "Bloodthirster",
+    "Candycorn Snake",
+    "Casull",
+    "Charged Creeper Queen",
+    "Charmy Green",
+    "Chromo Hando",
+    "Comic Venom",
+    "Cracked World",
+    "Crazy Idol",
+    "Crazy Overseer",
+    "Crazy Ruby",
+    "Cream Nog",
+    "Creeper Queen",
+    "Crimson Mist",
+    "D4She",
+    "Dark Determination",
+    "Dead Experience",
+    "Deimos Crimson Requiem",
+    "Deimos Queen",
+    "Deimos Snake",
+    "Devil's Moon",
+    "Devil4C",
+    "Digital SPTW",
+    "Eldritch Hierophant",
+    "Elf Pistols",
+    "Elizabeth Liones",
+    "Elucidator & Dark Repulser",
+    "Emperor",
+    "Emperor OVA",
+    "Female Hand",
+    "Festive Free",
+    "Festive Platinum: The World",
+    "Festive World",
+    "Frostbite",
+    "Frozone",
+    "Gear 4 Luffy",
+    "Ghost World",
+    "Ghostface",
+    "Glacier Trackstar",
+    "Glock-18",
+    "Glock-18 Fade",
+    "Gold Platinum",
+    "Golden & Wet",
+    "Golden Frieza",
+    "Grim Reaper",
+    "Headhunter",
+    "Heaven Act 4",
+    "Heavenly Experience",
+    "Hexed Experience Requiem",
+    "Hierophant Black",
+    "Hierophant Frost",
+    "Hierophant Purple",
+    "Hierophant Yellow",
+    "Holly's Sickness",
+    "Horseman of Heaven",
+    "Ice Cold Chili Pepper",
+    "Jack o Platinum",
+    "Jade Peace",
+    "Jaguar Platinum",
+    "Jester Crimson",
+    "Kanshou and Bakuya",
+    "Kikoku",
+    "Killer Queen Reveal",
+    "Killer Queen: Bites the Ice",
+    "Killer Reveal",
+    "King Krampus",
+    "King of the End",
+    "Light Bringer",
+    "Linked Anubis",
+    "Lord Boros",
+    "Magellan",
+    "Magician's Red Over Heaven",
+    "Manga Crimson",
+    "Megumin",
+    "Mintsnake",
+    "Mirage of Phantoms",
+    "Misaka Mikoto",
+    "Moon of Christmas Present",
+    "Movie Venom",
+    "Mr Joestar",
+    "MR Jukes Angels",
+    "Ms Aerosmith",
+    "NEO TWAU",
+    "Neon Ascension Diamond",
+    "NERF Jolt",
+    "Nexus Crimson",
+    "Nonosama Bo",
+    "ODM Gear",
+    "One Above All",
+    "Peppermint Crimson",
+    "Pinky Fingers",
+    "Pumpkin Patch",
+    "Queen Crimson",
+    "Retro The World Over Heaven",
+    "Rock Unleashed",
+    "Sakura",
+    "Shadow The World",
+    "Sheared Snow Golem",
+    "Silver Chariot OVA",
+    "Silver President",
+    "Snake of Christmas Past",
+    "Snow Golem",
+    "Sorcerer's Ember",
+    "Spiderman",
+    "Spirit Bomb",
+    "Star Platinum OVA",
+    "Star Striped Eagle",
+    "Star Waifu",
+    "Star Waifu: The World",
+    "Stone Platinum",
+    "Sukuna",
+    "Sukuna King Crimson Requiem",
+    "Sumo Star Platinum",
+    "Sumo The World",
+    "The Waifu Over Heaven",
+    "The Waifu V1",
+    "The Waifu v2",
+    "The Waifu V2",
+    "The Waifu: Alternate Universe",
+    "The World 2",
+    "The World Greatest High",
+    "The World OVA",
+    "The World: Ultimate",
+    "thumb|Made in Christmas Future",
+    "Tomb Crypt Tusk",
+    "Toy Fingers",
+    "Train to Hell",
+    "Tsunade",
+    "Tyrant Crimson",
+    "Uber Spy",
+    "Undead Flare",
+    "Undead Hand",
+    "Vela Nova",
+    "Vinegar Crimson",
+    "Virus Vessel",
+    "Volcanic Experience Requiem",
+    "Wispy Chariot",
+}
+
+local function skinKey(name)
+    local normalized = tostring(name):lower():gsub("[%s%p]", "")
+    return normalized
+end
+local function selectedSkinValid()
+    return CONFIG.SkinMode ~= "Selected" or #CONFIG.TargetSkins > 0
+end
+local function shouldKeepSkin(skin)
+    if skin == "" then return false end
+    if CONFIG.SkinMode ~= "Selected" then return true end
+    for _, name in ipairs(CONFIG.TargetSkins) do if skinKey(name) == skinKey(skin) then return true end end
+    return false
+end
+local function skinPolicyStamp()
+    local keys = {}
+    for _, name in ipairs(CONFIG.TargetSkins) do table.insert(keys, skinKey(name)) end
+    table.sort(keys)
+    return CONFIG.SkinMode .. ":" .. table.concat(keys, "|") .. ":" .. CONFIG.TargetStand
+end
+local function mayResetSkin(skin)
+    return selectedSkinValid() and not shouldKeepSkin(skin)
+end
+
+local function checkedSkinCanReset(expectedStand): boolean
     local proof = skinProof
     skinProof = nil
     if not proof or proof.character ~= player.Character or proof.stand ~= expectedStand
-        or standName() ~= expectedStand or os.clock() - proof.checkedAt > 20 then setSkinLine(nil); return false end
-    -- Requery immediately before fruit and again before confirming its dialogue.
+        or standName() ~= expectedStand or os.clock() - proof.checkedAt > 20
+        or proof.policyStamp ~= skinPolicyStamp() then setSkinLine(nil); return false end
     local ok, fresh = pcall(fetchStandSnapshot)
     checkCancelled()
     if not ok then setSkinLine(nil); return false end
     setSkinLine(fresh.skin)
-    if fresh.skin ~= "" or fresh.stand ~= proof.stand or fresh.createdDate ~= proof.createdDate
-        or fresh.originalOwner ~= proof.originalOwner then return false end
+    if not mayResetSkin(fresh.skin) or fresh.skin ~= proof.skin or fresh.stand ~= proof.stand
+        or fresh.createdDate ~= proof.createdDate or fresh.originalOwner ~= proof.originalOwner
+        or isTarget(fresh.stand, CONFIG.TargetStand) then return false end
+    fresh.policyStamp = skinPolicyStamp()
     skinProof = fresh
     return true
 end
@@ -28777,7 +29222,7 @@ local function readSkin(): (string, string)
     skinProof = nil
     setSkinLine(nil)
     local snapshot = fetchStandSnapshot()
-    if snapshot.skin == "" then skinProof = snapshot end
+    if mayResetSkin(snapshot.skin) then snapshot.policyStamp = skinPolicyStamp(); skinProof = snapshot end
     setSkinLine(snapshot.skin)
     return snapshot.skin, snapshot.stand
 end
@@ -28919,7 +29364,7 @@ local function itemDialogue(itemName, done)
             local base = normalizeName((itemName:gsub("^Redeemed ", "")))
             if kind == "accept" and base == "rokakaka" then
                 diagnostics.Add("fruit.validation.begin", {stand = standName()})
-                if not checkedSkinIsBlank(standName()) or isTarget(standName(), CONFIG.TargetStand) then
+                if not checkedSkinCanReset(standName()) or isTarget(standName(), CONFIG.TargetStand) then
                     diagnostics.Add("fruit.validation.blocked", nil, "WARN")
                     error("Skin data changed before fruit confirmation; stopped", 0)
                 end
@@ -29016,6 +29461,7 @@ local function rollUntilSkin()
     local names = rollItems()
     local target = CONFIG.TargetStand
     validateTarget(CONFIG.RollItem, target)
+    if not selectedSkinValid() then error("Choose at least one skin to keep before using Selected skins.",0) end
     local itemLabel = CONFIG.RollItem == "Rib" and "Rib Cages" or "arrows"
     local rolls = 0
     metrics.rolls = 0
@@ -29028,7 +29474,7 @@ local function rollUntilSkin()
         if currentName then
             say("Checking skin on " .. currentName .. "...")
             local skin, inspectedName = readSkin()
-            if skin ~= "" then
+            if shouldKeepSkin(skin) then
                 return "SKIN FOUND: " .. skin .. " (" .. inspectedName .. "). Kept!"
             end
             if CONFIG.MaxRolls > 0 and rolls >= CONFIG.MaxRolls then
@@ -29038,10 +29484,10 @@ local function rollUntilSkin()
             if not waitForTool(names) then return "No usable " .. itemLabel .. " found in the live inventory. Current Stand kept." end
             if not waitForTool(FRUIT) then return "No usable Rokakaka found in the live inventory. Current Stand kept." end
             checkCancelled()
-            if not checkedSkinIsBlank(inspectedName) or isTarget(standName(), target) then
+            if not checkedSkinCanReset(inspectedName) or isTarget(standName(), target) then
                 error("Skin/Stand changed before reset; stopped", 0)
             end
-            say("No skin. Using Rokakaka...")
+            say(skin=="" and "No skin. Using Rokakaka..." or ("Unselected skin: "..skin..". Using Rokakaka..."))
             local resetCharacter = player.Character
             local used, tool = useItem(FRUIT, false)
             itemDialogue(used, function() return standName() == nil end)
@@ -29070,7 +29516,7 @@ end
 
 diagnostics.Provider = function()
     local snapshot = {
-        config = {item = CONFIG.RollItem, target = CONFIG.TargetStand, maxRolls = CONFIG.MaxRolls},
+        config = {item = CONFIG.RollItem, target = CONFIG.TargetStand, maxRolls = CONFIG.MaxRolls, skinMode=CONFIG.SkinMode, keepSkins=CONFIG.TargetSkins},
         runtime = {alive = alive, busy = busy, looping = loopActive, cancelled = cancelled, inFlight = inFlight, rolls = metrics.rolls},
         activeItem = diagnostics.ActiveItem or "<none>",
         pendingInputHandler = diagnostics.Path(pendingInputHandler),
@@ -29082,6 +29528,8 @@ diagnostics.Provider = function()
     if busyOk then snapshot.otherAutomationBusy = automationBusy else snapshot.otherAutomationError = tostring(automationBusy) end
     local value = stats and stats:FindFirstChild("Stand")
     snapshot.equippedStand = value and diagnostics.Property(value, "Value") or "<missing>"
+    if _G.__StandLabSourceV10.GetCandyAudit then snapshot.candyAudit=_G.__StandLabSourceV10.GetCandyAudit() end
+    snapshot.preferences={status=Preferences.status}
     local serverState = _G.__StandLabSourceV10.GetServerState
     if serverState then local ok, state = pcall(serverState); if ok then snapshot.servers = state end end
     local skillTree = player:FindFirstChild("CharacterSkillTree")
@@ -29180,6 +29628,7 @@ diagnostics.Provider = function()
     return snapshot
 end
 _G.__StandLabSourceV10.GetReport = diagnostics.BuildReport
+_G.__StandLabSourceV10.LogEvent = diagnostics.Add
 diagnostics.Add("session.ready", {getconnections = type(getconnections), firesignal = type(firesignal),
     setclipboard = type(setclipboard), character = diagnostics.Path(player.Character)})
 
@@ -29189,26 +29638,95 @@ diagnostics.Add("session.ready", {getconnections = type(getconnections), firesig
         return list
     end
     local targetPicker, itemPicker
-    itemPicker = controls:Dropdown({Title = "Roll item", Values = {"Mysterious Arrow", "Rib Cage of The Saint's Corpse"}, Value = "Mysterious Arrow", Callback = function(selected)
+    itemPicker = controls:Dropdown({Title = "Roll item", Values = {"Mysterious Arrow", "Rib Cage of The Saint's Corpse"}, Value = CONFIG.RollItem=="Rib" and "Rib Cage of The Saint's Corpse" or "Mysterious Arrow", Callback = function(selected)
         if loopActive or busy then
             if itemPicker then itemPicker.Raw:Set(CONFIG.RollItem == "Rib" and "Rib Cage of The Saint's Corpse" or "Mysterious Arrow", true) end
             return
         end
         CONFIG.RollItem = selected == "Rib Cage of The Saint's Corpse" and "Rib" or "Arrow"
         CONFIG.TargetStand = ""
+        if Preferences.ready then Preferences:Set("Stand Rolls/Roll controls/Stop at Stand","Any Stand / skin only") end
         if targetPicker then targetPicker.Raw:Refresh(eligibleStands(), false); targetPicker.Raw:Set("Any Stand / skin only", true) end
     end})
-    targetPicker = controls:Dropdown({Title = "Stop at Stand", Desc = "Keeps the selected Stand OR any skin. Searchable list follows the selected item pool.", Values = eligibleStands(), Value = "Any Stand / skin only", Callback = function(selected)
+    targetPicker = controls:Dropdown({Title = "Stop at Stand", Desc = "Keeps the selected Stand OR a skin matching your Skin rule.", Values = eligibleStands(), Value = CONFIG.TargetStand~="" and CONFIG.TargetStand or "Any Stand / skin only", Callback = function(selected)
         if loopActive or busy then if targetPicker then targetPicker.Raw:Set(CONFIG.TargetStand ~= "" and CONFIG.TargetStand or "Any Stand / skin only", true) end; return end
-        CONFIG.TargetStand = selected == "Any Stand / skin only" and "" or tostring(selected)
+        local valid=selected=="Any Stand / skin only"
+        for _,entry in ipairs(STAND_CATALOG) do if entry.name==selected and entry.pool==CONFIG.RollItem then valid=true end end
+        CONFIG.TargetStand = valid and selected~="Any Stand / skin only" and tostring(selected) or ""
+        if not valid then
+            Preferences:Set("Stand Rolls/Roll controls/Stop at Stand","Any Stand / skin only")
+            if targetPicker then targetPicker.Raw:Set("Any Stand / skin only",true) end
+        end
     end})
+    local skinSection = tab:Section({Title = "Skin targets", Side = "left"})
+    local skinModePicker, skinPicker
+    local customSkins = Preferences:Get("customSkinNames", {})
+    if type(customSkins)~="table" then customSkins={} end
+    local function skinChoices()
+        local list,seen={},{}
+        for _,source in ipairs({SKIN_CATALOG,customSkins,CONFIG.TargetSkins}) do
+            for _,name in ipairs(source) do
+                if type(name)=="string" and name~="" and not seen[skinKey(name)] then seen[skinKey(name)]=true;table.insert(list,name) end
+            end
+        end
+        table.sort(list)
+        return list
+    end
+    skinSection:Paragraph({Title = "Keep rules", Desc = "Any skin keeps every skin. Selected skins rerolls unselected skins, including your current skin. A selected Stand is also kept. Wiki names include limited/evolved skins that may not roll from your item."})
+    skinModePicker = skinSection:Dropdown({Title = "Skin rule", Values = {"Keep any skin", "Keep selected skins"},
+        Value = CONFIG.SkinMode=="Selected" and "Keep selected skins" or "Keep any skin", Callback = function(value)
+            if loopActive or busy then
+                if skinModePicker then skinModePicker.Raw:Set(CONFIG.SkinMode=="Selected" and "Keep selected skins" or "Keep any skin",true) end
+                return
+            end
+            CONFIG.SkinMode=value=="Keep selected skins" and "Selected" or "Any"
+            skinProof=nil
+        end})
+    skinPicker = skinSection:Dropdown({Title = "Skins to keep", Desc = "Search wiki names. Select one or more; none are selected for you.", SearchAfter = 0,
+        Values = skinChoices(), Value = CONFIG.TargetSkins, Multi = true, Callback = function(values)
+            if loopActive or busy then if skinPicker then skinPicker.Raw:Set(CONFIG.TargetSkins,true) end;return end
+            local selected,seen={},{}
+            if type(values)=="table" then
+                for _,name in ipairs(values) do
+                    if type(name)=="string" and name~="" and not seen[skinKey(name)] then
+                        seen[skinKey(name)]=true;table.insert(selected,name)
+                    end
+                end
+            end
+            CONFIG.TargetSkins=selected;skinProof=nil
+        end})
+    local function addSkin(name)
+        name=tostring(name):match("^%s*(.-)%s*$")
+        if name=="" or name=="None" or #name>120 then return end
+        for _,known in ipairs(customSkins) do if skinKey(known)==skinKey(name) then return end end
+        table.insert(customSkins,name)
+        Preferences:Set("customSkinNames",customSkins)
+        skinPicker.Raw:Refresh(skinChoices(),true)
+    end
+    skinSection:Input({Title = "Add skin name", NoSave = true, Placeholder = "Exact name shown in Stand Data", Value = "", Callback = function(name)
+        if loopActive or busy then return end
+        for value in tostring(name):gmatch("[^,;\r\n]+") do addSkin(value) end
+    end})
+    skinSection:Button({Title = "Add current skin to picker", Desc = "Reads its exact game name. Then select it in Skins to keep.", Icon = "plus", Callback = function()
+        if loopActive or busy then return end
+        busy=true
+        task.spawn(function()
+            local ok,skin=pcall(readSkin)
+            if ok and skin~="" then addSkin(skin);say("Added "..skin..". Select it in Skins to keep.")
+            else say(ok and "Your current Stand has no skin." or tostring(skin)) end
+            busy=false
+        end)
+    end})
+
+
     controls:Input({Title = "Roll limit", Desc = "0 means unlimited while supplies last.", Value = "0", Callback = function(value)
         if loopActive then return end
         CONFIG.MaxRolls = math.clamp(math.floor(tonumber(value) or 0), 0, 10000)
     end})
-    controls:Button({Title = "Start rolling", Desc = "Stops at your selected Stand or any skin. No summoning for inspection.", Icon = "play", Callback = function()
+    controls:Button({Title = "Start rolling", Desc = "Uses your Stand and Skin rules. Selected skins can reroll your current skin.", Icon = "play", Callback = function()
         if loopActive or busy or inFlight > 0 or sourceBusy() then say("Stop the current automation first."); return end
-        diagnostics.Add("roll.start", {item = CONFIG.RollItem, target = CONFIG.TargetStand, maxRolls = CONFIG.MaxRolls})
+        if not selectedSkinValid() then say("Select at least one skin to keep first.");return end
+        diagnostics.Add("roll.start", {item = CONFIG.RollItem, target = CONFIG.TargetStand, maxRolls = CONFIG.MaxRolls, skinMode=CONFIG.SkinMode, keepSkins=CONFIG.TargetSkins})
         loopActive, cancelled, SL_POLICY.RollActive = true, false, true
         task.spawn(function()
             local ok, result = diagnostics.Try("roll", rollUntilSkin)
@@ -29350,7 +29868,10 @@ _G.__MethionSettingsSections.Movement = SettingsTab:Section({Title = "Movement",
 _G.__MethionSettingsSections.Performance = SettingsTab:Section({Title = "Performance", Side = "left"})
 
 _G.__MethionSettingsSections.General:Paragraph({Title = "General Settings", Desc = "Rejoin and auto-farm settings."})
-_G.__MethionSettingsSections.General:Paragraph({Title = "Explicit automation", Desc = "Farming, prestige, selling and skill allocation start OFF. Automatic config loading is disabled."})
+_G.__MethionSettingsSections.General:Paragraph({Title = "Explicit automation", Desc = "Preferences save automatically. Farming, rolling, prestige and selling start OFF."})
+local preferenceStatus = _G.__MethionSettingsSections.General:Paragraph({Title="Settings save",Desc=Preferences.status})
+Preferences.OnStatus=function(text) preferenceStatus:SetDesc(text) end
+_G.__MethionSettingsSections.General:Button({Title="Save settings now",Icon="save",Callback=function() Preferences:Flush() end})
 _G.__MethionSettingsSections.General:Input({
     Title = "Hide / show key", Desc = "Enter a Roblox key name, such as RightShift, RightControl or F6.", Value = "RightShift",
     Callback = function(name)
@@ -29511,7 +30032,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v23 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v24 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
@@ -31999,6 +32520,8 @@ workspace.DescendantAdded:Connect(function(o)
     end
 end)
 
+Preferences:Restore()
+Window.Raw.Gui.Destroying:Connect(function() Preferences:Flush() end)
 IntegratedServers:RestoreArrival()
 Rejoin.start()
 if MAIN_AUTOSTART and AutoFarmToggle then
