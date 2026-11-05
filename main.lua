@@ -17125,7 +17125,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV25",
+        Name = "StandLabSourceV26",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -17146,7 +17146,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV25",
+            FolderName = "StandLabSourceV26",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -19441,7 +19441,9 @@ end
 local Farm = {}
 
 function Farm.isActive()
-    return (State.Farm == true or State.HalloweenCandyFarm == true)
+    local runtime=_G.__StandLabSourceV10
+    local entered=not runtime or not runtime.IsGameReady or runtime.IsGameReady()
+    return entered and (State.Farm == true or State.HalloweenCandyFarm == true)
         and State.HalloweenTurnInBusy ~= true
 end
 
@@ -20396,86 +20398,8 @@ local rejoinConn = nil
 local rejoinBusy = false
 
 local function queueReloadAndRejoin()
-    local url = RELOAD_SCRIPT_RAW_URL
-    if type(url) ~= "string" or url == "" or not url:match("^https?://") then return false end
-    local queueFunction = MethionSH_Env.queue_on_teleport or MethionSH_Env.queueonteleport
-    if type(queueFunction) ~= "function" and type(MethionSH_Env.syn) == "table" then
-        queueFunction = MethionSH_Env.syn.queue_on_teleport
-    end
-    if type(queueFunction) ~= "function" then return false end
-
-    local mode = Config.FarmTeleportMode == "tween" and "tween" or "instant"
-    local filterJson = HttpService:JSONEncode(Config.FarmOnlyItems or {})
-    local autoStart = State.Farm == true
-    local queueSource = table.concat({
-        "repeat task.wait() until game:IsLoaded()",
-        "local env = type(getgenv) == \"function\" and getgenv() or _G",
-        "local http = game:GetService(\"HttpService\")",
-        "env.__MethionSHFarmTeleportMode = " .. string.format("%q", mode),
-        "local filterOk, filter = pcall(function() return http:JSONDecode(" .. string.format("%q", filterJson) .. ") end)",
-        "if filterOk and type(filter) == \"table\" then env.__MethionSHFarmOnlyItems = filter end",
-        "env.__MethionSHReloadOnKick = " .. tostring(Config.AutoRejoinEnabled == true),
-        "env.__MethionSHAutoStart = " .. tostring(autoStart),
-        "local Players = game:GetService(\"Players\")",
-        "local ReplicatedStorage = game:GetService(\"ReplicatedStorage\")",
-        "local Lighting = game:GetService(\"Lighting\")",
-        "local TeleportService = game:GetService(\"TeleportService\")",
-        "local player = Players.LocalPlayer",
-        "local function enterGame()",
-        "    local playerGui = player:WaitForChild(\"PlayerGui\")",
-        "    pcall(function() if not playerGui:FindFirstChild(\"HUD\") then local objects = ReplicatedStorage:FindFirstChild(\"Objects\"); local template = objects and objects:FindFirstChild(\"HUD\"); if template then template:Clone().Parent = playerGui end end end)",
-        "    local character = player.Character or player.CharacterAdded:Wait()",
-        "    local remote = character:WaitForChild(\"RemoteEvent\", 15)",
-        "    if remote and remote:IsA(\"RemoteEvent\") then remote:FireServer(\"PressedPlay\") end",
-        "    for _, name in ipairs({\"LoadingScreen1\", \"LoadingScreen\"}) do local screen = playerGui:FindFirstChild(name); if screen then screen:Destroy() end end",
-        "    player:SetAttribute(\"LOADED\", \"Skip\")",
-        "    local dof = Lighting:FindFirstChild(\"DepthOfField\"); if dof then dof:Destroy() end",
-        "    local loading = workspace:FindFirstChild(\"LoadingScreen\"); local song = loading and loading:FindFirstChild(\"Song\"); if song then song:Destroy() end",
-        "end",
-        "task.spawn(function() while true do pcall(enterGame); task.wait(3) end end)",
-        "local deadline = os.clock() + 10",
-        "local entered = false",
-        "repeat",
-        "    task.wait(0.1)",
-        "    local character = player.Character",
-        "    local humanoid = character and character:FindFirstChildOfClass(\"Humanoid\")",
-        "    local root = character and character:FindFirstChild(\"HumanoidRootPart\")",
-        "    entered = character ~= nil and character.Parent ~= nil and humanoid ~= nil and humanoid.Health > 0 and root ~= nil and player:GetAttribute(\"LOADED\") == \"Skip\"",
-        "until entered or os.clock() >= deadline",
-        "if not entered then",
-        "    local queueFn = env.queue_on_teleport or env.queueonteleport",
-        "    if type(queueFn) ~= \"function\" and type(env.syn) == \"table\" then queueFn = env.syn.queue_on_teleport end",
-        "    local retrySource = env.__MethionSHRecoverySource",
-        "    if type(queueFn) == \"function\" and type(retrySource) == \"string\" then pcall(queueFn, retrySource) end",
-        "    local targetId = nil",
-        "    local ok, response = pcall(function() return game:HttpGet(\"https://games.roblox.com/v1/games/\" .. tostring(game.PlaceId) .. \"/servers/Public?sortOrder=Asc&limit=100\") end)",
-        "    if ok and type(response) == \"string\" then",
-        "        local decodedOk, payload = pcall(function() return http:JSONDecode(response) end)",
-        "        if decodedOk and type(payload) == \"table\" and type(payload.data) == \"table\" then",
-        "            local candidates = {}",
-        "            for _, server in ipairs(payload.data) do local id = server.id; local playing = tonumber(server.playing) or math.huge; local maximum = tonumber(server.maxPlayers) or 0; if type(id) == \"string\" and id ~= \"\" and id ~= game.JobId and maximum > 0 and playing < maximum then table.insert(candidates, {id = id, playing = playing}) end end",
-        "            table.sort(candidates, function(a, b) return a.playing < b.playing end)",
-        "            if candidates[1] then targetId = candidates[1].id end",
-        "        end",
-        "    end",
-        "    local hopOk = false",
-        "    if targetId then hopOk = pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, targetId, player) end) end",
-        "    if not hopOk then pcall(function() TeleportService:Teleport(game.PlaceId, player) end) end",
-        "    return",
-        "end",
-        "task.wait(0.5)",
-        "local source = game:HttpGet(" .. string.format("%q", url) .. ")",
-        "assert(type(source) == 'string' and #source > 0, 'Methion source is empty')",
-        "local chunk, err = loadstring(source)",
-        "assert(type(chunk) == 'function', tostring(err or 'MethionSH compile failed'))",
-        "chunk()",
-        "",
-    }, "\n")
-    MethionSH_Env.__MethionSHRecoverySource = queueSource
-    local ok = pcall(queueFunction, queueSource)
-    if not ok then return false end
-    local teleported = pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
-    return teleported
+    local runtime=_G.__StandLabSourceV10
+    return runtime and runtime.RejoinWithReload and runtime.RejoinWithReload() or false
 end
 
 function Rejoin.start()
@@ -20838,6 +20762,8 @@ local Loops = {}
 function Loops.noclip()
     RunService.Stepped:Connect(function()
         if not State.NoClip then return end
+        local runtime=_G.__StandLabSourceV10
+        if runtime and runtime.IsGameReady and not runtime.IsGameReady() then return end
         local char = LP.Character
         if not char then return end
         for _, p in ipairs(char:GetDescendants()) do
@@ -27766,6 +27692,7 @@ end
     local idleDelay = math.clamp(tonumber(arrival and arrival.idleDelay) or 15, 5, 60)
     local idleSince, pendingArrival, autoToggle, reloadToggle, controller = nil, nil, nil, nil, nil
     local captureAvoidance,stopAvoidance,restoreAvoidance
+    local readyCharacter,joinPendingData
     local tab = Window:Tab({Title = "Servers", Icon = "server", Desc = "Travel and item hopping in Stand Lab."})
     local travel = tab:Section({Title = "Travel", Side = "left"})
     local items = tab:Section({Title = "Item hopping", Side = "left"})
@@ -27808,7 +27735,7 @@ end
         if not pendingArrival then
             pendingArrival = {version = 1, placeId = game.PlaceId, resumeFarm = State.Farm == true or State.HalloweenCandyFarm == true,
                 candy = State.HalloweenCandyFarm == true, items = table.clone(Config.FarmOnlyItems or {}), mode = Config.FarmTeleportMode,
-                autoHop = autoEnabled, idleDelay = idleDelay}
+                autoHop = autoEnabled, idleDelay = idleDelay, enterGame = readyCharacter and select(2,readyCharacter()) or false}
         end
         if captureAvoidance then captureAvoidance() end
         pendingArrival.recent = table.clone(visited)
@@ -27820,32 +27747,185 @@ end
             return
         end
         if not queued then
-            local source = [========[-- This queued bootstrap reloads the same Stand Lab hub, once per arrival.
+            local source = [========[-- Wait for the game's own loading/menu UI before executing the full hub.
 repeat task.wait() until game:IsLoaded()
-local env = type(getgenv) == "function" and getgenv() or _G
+local env=type(getgenv)=="function" and getgenv() or _G
 if env.__StandLabArrivalStarted then return end
-local teleport = game:GetService("TeleportService")
-local http = game:GetService("HttpService")
-local ok, encoded = pcall(function() return teleport:GetTeleportSetting("StandLabArrival") end)
-if not ok or type(encoded) ~= "string" or encoded == "" then return end
-local decoded, data = pcall(function() return http:JSONDecode(encoded) end)
-if not decoded or type(data) ~= "table" or data.version ~= 1 or data.placeId ~= game.PlaceId then return end
-env.__StandLabArrivalStarted = true
-pcall(function() teleport:SetTeleportSetting("StandLabArrival", "") end)
-env.__StandLabServerArrival = data
-env.__MethionSHFarmOnlyItems = type(data.items) == "table" and data.items or {}
-env.__MethionSHFarmTeleportMode = data.mode
--- Retain the inspected hub's PressedPlay command for an unattended arrival.
-if data.resumeFarm then
-    local player = game:GetService("Players").LocalPlayer
-    local character = player.Character or player.CharacterAdded:Wait()
-    local remote = character:WaitForChild("RemoteEvent", 30)
-    if remote then pcall(function() remote:FireServer("PressedPlay") end) end
+local teleport=game:GetService("TeleportService")
+local http=game:GetService("HttpService")
+local ok,encoded=pcall(function() return teleport:GetTeleportSetting("StandLabArrival") end)
+if not ok or type(encoded)~="string" or encoded=="" then return end
+local decoded,data=pcall(function() return http:JSONDecode(encoded) end)
+if not decoded or type(data)~="table" or data.version~=1 or data.placeId~=game.PlaceId then return end
+env.__StandLabArrivalStarted=true
+pcall(function() teleport:SetTeleportSetting("StandLabArrival","") end)
+env.__StandLabServerArrival=data
+env.__MethionSHFarmOnlyItems=type(data.items)=="table" and data.items or {}
+env.__MethionSHFarmTeleportMode=data.mode
+-- Observe the real client UI; never manufacture a HUD or a LOADED attribute.
+local function newJoinObserver(player, clock)
+    local self={events={},last=nil,stage=nil,stableSince=nil,identity=nil,nextRead=0}
+    local function path(object)
+        if not object then return "<missing>" end
+        local ok,result=pcall(function() return object:GetFullName() end)
+        return ok and result or "<unavailable>"
+    end
+    local function prop(object,key)
+        if not object then return nil end
+        local ok,result=pcall(function() return object[key] end)
+        return ok and result or nil
+    end
+    local function visible(object)
+        if not object or not object.Parent then return false end
+        local current=object
+        while current and current~=player do
+            if current:IsA("GuiObject") and not current.Visible then return false end
+            if current:IsA("ScreenGui") and not current.Enabled then return false end
+            current=current.Parent
+        end
+        return current==player
+    end
+    local function caption(object)
+        if object:IsA("TextButton") or object:IsA("TextLabel") then
+            local text=object.Text:gsub("<[^>]*>",""):lower():gsub("%s+"," ")
+            return text
+        end
+        return ""
+    end
+    local function textInside(object)
+        local parts={caption(object)}
+        for i,child in ipairs(object:GetDescendants()) do
+            if i>500 then break end
+            if visible(child) then table.insert(parts,caption(child)) end
+        end
+        return table.concat(parts," ")
+    end
+    function self:Read(force)
+        local now=clock()
+        if not force and self.last and now<self.nextRead then return self.last end
+        self.nextRead=now+.5
+        local pg=player:FindFirstChildOfClass("PlayerGui")
+        local hud=pg and pg:FindFirstChild("HUD")
+        local main=hud and hud:FindFirstChild("Main")
+        local character=player.Character
+        local root=character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        local re=character and character:FindFirstChild("RemoteEvent")
+        local rf=character and character:FindFirstChild("RemoteFunction")
+        local living=workspace:FindFirstChild("Living")
+        local facts={gameLoaded=game:IsLoaded(),playerGui=path(pg),playerGuiParent=path(pg and pg.Parent),
+            hud=path(hud),hudVisible=visible(hud),mainVisible=visible(main),character=path(character),
+            rootAnchored=prop(root,"Anchored"),health=prop(humanoid,"Health"),walkSpeed=prop(humanoid,"WalkSpeed"),
+            platformStand=prop(humanoid,"PlatformStand"),sit=prop(humanoid,"Sit"),
+            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={}}
+        pcall(function() facts.loadedAttribute=player:GetAttribute("LOADED") end)
+        pcall(function() facts.cameraType=tostring(workspace.CurrentCamera.CameraType);facts.cameraSubject=path(workspace.CurrentCamera.CameraSubject) end)
+        local data=player:FindFirstChild("LoadedData")
+        facts.loadedData=prop(data,"Value")
+        local blocked,assetsLoading=false,false
+        local candidates={}
+        if pg then
+            for i,child in ipairs(pg:GetChildren()) do
+                if i<=32 then table.insert(facts.roots,{name=child.Name,class=child.ClassName}) end
+                if child.Name=="LoadingScreen" or child.Name=="LoadingScreen1" then
+                    local descendants=child:GetDescendants()
+                    local shown=child:IsA("GuiObject") and visible(child) or false
+                    if visible(child) then
+                        for n,object in ipairs(descendants) do
+                            if n>500 then break end
+                            if object:IsA("GuiObject") and visible(object) then shown=true;break end
+                        end
+                    end
+                    table.insert(facts.screens,{name=child.Name,visible=shown})
+                    if shown then
+                        blocked=true
+                        local allText=textInside(child)
+                        local done,total=allText:match("loading assets%s*(%d+)%s*/%s*(%d+)")
+                        if done and tonumber(done)<tonumber(total) then
+                            assetsLoading=true;facts.assets={loaded=tonumber(done),total=tonumber(total)}
+                        end
+                        for n,button in ipairs(descendants) do
+                            if n>500 then break end
+                            if button:IsA("GuiButton") and visible(button) and button.Active then
+                                local label=textInside(button):match("^%s*(.-)%s*$")
+                                if label=="play" or label=="play play" then
+                                    local rank=1
+                                    local ancestor=button.Parent
+                                    for _=1,3 do
+                                        if not ancestor or ancestor==child then break end
+                                        local context=textInside(ancestor)
+                                        if context:find("main game",1,true) and not context:find("game modes",1,true) then rank=2;break end
+                                        ancestor=ancestor.Parent
+                                    end
+                                    table.insert(candidates,{button=button,rank=rank,path=path(button)})
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        table.sort(candidates,function(a,b) return a.rank>b.rank end)
+        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank}) end
+        local candidate=candidates[1]
+        if candidates[2] and candidates[2].rank==candidate.rank then candidate=nil end
+        local inWorld=character and living and character:IsDescendantOf(living)
+        local physical=humanoid and humanoid.Health>0 and root and not root.Anchored
+            and humanoid.WalkSpeed>0 and not humanoid.PlatformStand
+        local ready=facts.gameLoaded and pg and pg.Parent==player and facts.hudVisible and facts.mainVisible
+            and inWorld and physical and re and rf and not blocked and facts.loadedData~=false
+        local stage
+        if not facts.gameLoaded then stage="loading-place"
+        elseif not pg or pg.Parent~=player then stage="waiting-player-gui"
+        elseif assetsLoading then stage="loading-assets"
+        elseif candidate then stage="play-menu-ready"
+        elseif blocked then stage="waiting-intro"
+        elseif not hud then stage="missing-hud"
+        elseif not facts.hudVisible or not facts.mainVisible then stage="waiting-hud"
+        elseif not inWorld or not re or not rf then stage="waiting-live-character"
+        elseif not physical then stage="waiting-movement"
+        elseif facts.loadedData==false then stage="waiting-player-data"
+        else stage="settling" end
+        local identity=ready and {pg,hud,main,character,root,re,rf} or nil
+        local same=identity~=nil and self.identity~=nil
+        if same then for i,value in ipairs(identity) do if self.identity[i]~=value then same=false;break end end end
+        if not same then self.stableSince=ready and now or nil end
+        self.identity=identity
+        facts.stableSeconds=self.stableSince and now-self.stableSince or 0
+        facts.ready=ready and facts.stableSeconds>=2 or false
+        if facts.ready then stage="ready" end
+        facts.stage=stage
+        if stage~=self.stage then
+            self.stage=stage
+            table.insert(self.events,{at=now,stage=stage,hud=facts.hud,character=facts.character,assets=facts.assets})
+            while #self.events>24 do table.remove(self.events,1) end
+        end
+        self.last=facts
+        self.button=not assetsLoading and candidate and candidate.button or nil
+        return facts
+    end
+    function self:Report()
+        return {current=self:Read(),transitions=table.clone(self.events),
+            note="UI and movement observations, not a proven cause of a failed game-client load."}
+    end
+    return self
 end
-local source = game:HttpGet("https://raw.githubusercontent.com/JeremyInk/stand-lab/main/main.lua")
-assert(type(source) == "string" and #source > 0, "Stand Lab download was empty")
-local chunk, problem = loadstring(source)
-assert(type(chunk) == "function", tostring(problem))
+
+local player=game:GetService("Players").LocalPlayer
+while not player do task.wait(.5);player=game:GetService("Players").LocalPlayer end
+local observer=newJoinObserver(player,os.clock)
+local deadline,lastStage=os.clock()+90,nil
+repeat
+    local facts=observer:Read()
+    env.__StandLabJoinBootstrap=observer:Report()
+    if facts.stage~=lastStage then lastStage=facts.stage;print("[Stand Lab join] "..facts.stage) end
+    if facts.ready or facts.stage=="play-menu-ready" then break end
+    task.wait(.5)
+until os.clock()>=deadline
+local source=game:HttpGet("https://raw.githubusercontent.com/JeremyInk/stand-lab/main/main.lua")
+assert(type(source)=="string" and #source>0,"Stand Lab download was empty")
+local chunk,problem=loadstring(source)
+assert(type(chunk)=="function",tostring(problem))
 chunk()
 ]========]
             local ok, result = pcall(queueFunction, source)
@@ -27919,8 +27999,8 @@ chunk()
     items:Paragraph({Title = "Selected items", Desc = "Uses your Auto-Farm item filters, or the candy collector when it is active. Selling stays off."})
     autoToggle = items:Toggle({Title = "Collect + auto hop", Desc = "Collect selected items, then change servers when none remain.", Value = false,
         Callback = function(enabled)
-            if enabled and (controller.busy or competingAutomation()) then
-                say("Stop the current automation or finish traveling before starting item hopping.")
+            if enabled and (controller.busy or competingAutomation() or not readyCharacter()) then
+                say("Wait for game entry and finish the current automation or travel before starting item hopping.")
                 task.defer(function() if autoToggle then autoToggle:Set(false, true) end end)
                 return
             end
@@ -27934,6 +28014,7 @@ chunk()
                 setCollector(true, State.HalloweenCandyFarm == true)
                 say("Collecting selected items. The empty-server timer starts when none are loaded.")
             else
+                if joinPendingData then joinPendingData.resumeFarm=false;joinPendingData.autoHop=false end
                 setCollector(false, false)
                 if pendingArrival then pendingArrival.autoHop, pendingArrival.resumeFarm = false, false; pcall(saveArrival) end
                 say("Automatic item hopping stopped.")
@@ -27950,11 +28031,275 @@ chunk()
     local started = LP.OnTeleport:Connect(function(state)
         if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then controller:Started() end
     end)
-    local function readyCharacter()
-        local character = LP.Character
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-        return humanoid and humanoid.Health > 0 and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("RemoteFunction")
+    -- Observe the real client UI; never manufacture a HUD or a LOADED attribute.
+local function newJoinObserver(player, clock)
+    local self={events={},last=nil,stage=nil,stableSince=nil,identity=nil,nextRead=0}
+    local function path(object)
+        if not object then return "<missing>" end
+        local ok,result=pcall(function() return object:GetFullName() end)
+        return ok and result or "<unavailable>"
     end
+    local function prop(object,key)
+        if not object then return nil end
+        local ok,result=pcall(function() return object[key] end)
+        return ok and result or nil
+    end
+    local function visible(object)
+        if not object or not object.Parent then return false end
+        local current=object
+        while current and current~=player do
+            if current:IsA("GuiObject") and not current.Visible then return false end
+            if current:IsA("ScreenGui") and not current.Enabled then return false end
+            current=current.Parent
+        end
+        return current==player
+    end
+    local function caption(object)
+        if object:IsA("TextButton") or object:IsA("TextLabel") then
+            local text=object.Text:gsub("<[^>]*>",""):lower():gsub("%s+"," ")
+            return text
+        end
+        return ""
+    end
+    local function textInside(object)
+        local parts={caption(object)}
+        for i,child in ipairs(object:GetDescendants()) do
+            if i>500 then break end
+            if visible(child) then table.insert(parts,caption(child)) end
+        end
+        return table.concat(parts," ")
+    end
+    function self:Read(force)
+        local now=clock()
+        if not force and self.last and now<self.nextRead then return self.last end
+        self.nextRead=now+.5
+        local pg=player:FindFirstChildOfClass("PlayerGui")
+        local hud=pg and pg:FindFirstChild("HUD")
+        local main=hud and hud:FindFirstChild("Main")
+        local character=player.Character
+        local root=character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+        local re=character and character:FindFirstChild("RemoteEvent")
+        local rf=character and character:FindFirstChild("RemoteFunction")
+        local living=workspace:FindFirstChild("Living")
+        local facts={gameLoaded=game:IsLoaded(),playerGui=path(pg),playerGuiParent=path(pg and pg.Parent),
+            hud=path(hud),hudVisible=visible(hud),mainVisible=visible(main),character=path(character),
+            rootAnchored=prop(root,"Anchored"),health=prop(humanoid,"Health"),walkSpeed=prop(humanoid,"WalkSpeed"),
+            platformStand=prop(humanoid,"PlatformStand"),sit=prop(humanoid,"Sit"),
+            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={}}
+        pcall(function() facts.loadedAttribute=player:GetAttribute("LOADED") end)
+        pcall(function() facts.cameraType=tostring(workspace.CurrentCamera.CameraType);facts.cameraSubject=path(workspace.CurrentCamera.CameraSubject) end)
+        local data=player:FindFirstChild("LoadedData")
+        facts.loadedData=prop(data,"Value")
+        local blocked,assetsLoading=false,false
+        local candidates={}
+        if pg then
+            for i,child in ipairs(pg:GetChildren()) do
+                if i<=32 then table.insert(facts.roots,{name=child.Name,class=child.ClassName}) end
+                if child.Name=="LoadingScreen" or child.Name=="LoadingScreen1" then
+                    local descendants=child:GetDescendants()
+                    local shown=child:IsA("GuiObject") and visible(child) or false
+                    if visible(child) then
+                        for n,object in ipairs(descendants) do
+                            if n>500 then break end
+                            if object:IsA("GuiObject") and visible(object) then shown=true;break end
+                        end
+                    end
+                    table.insert(facts.screens,{name=child.Name,visible=shown})
+                    if shown then
+                        blocked=true
+                        local allText=textInside(child)
+                        local done,total=allText:match("loading assets%s*(%d+)%s*/%s*(%d+)")
+                        if done and tonumber(done)<tonumber(total) then
+                            assetsLoading=true;facts.assets={loaded=tonumber(done),total=tonumber(total)}
+                        end
+                        for n,button in ipairs(descendants) do
+                            if n>500 then break end
+                            if button:IsA("GuiButton") and visible(button) and button.Active then
+                                local label=textInside(button):match("^%s*(.-)%s*$")
+                                if label=="play" or label=="play play" then
+                                    local rank=1
+                                    local ancestor=button.Parent
+                                    for _=1,3 do
+                                        if not ancestor or ancestor==child then break end
+                                        local context=textInside(ancestor)
+                                        if context:find("main game",1,true) and not context:find("game modes",1,true) then rank=2;break end
+                                        ancestor=ancestor.Parent
+                                    end
+                                    table.insert(candidates,{button=button,rank=rank,path=path(button)})
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        table.sort(candidates,function(a,b) return a.rank>b.rank end)
+        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank}) end
+        local candidate=candidates[1]
+        if candidates[2] and candidates[2].rank==candidate.rank then candidate=nil end
+        local inWorld=character and living and character:IsDescendantOf(living)
+        local physical=humanoid and humanoid.Health>0 and root and not root.Anchored
+            and humanoid.WalkSpeed>0 and not humanoid.PlatformStand
+        local ready=facts.gameLoaded and pg and pg.Parent==player and facts.hudVisible and facts.mainVisible
+            and inWorld and physical and re and rf and not blocked and facts.loadedData~=false
+        local stage
+        if not facts.gameLoaded then stage="loading-place"
+        elseif not pg or pg.Parent~=player then stage="waiting-player-gui"
+        elseif assetsLoading then stage="loading-assets"
+        elseif candidate then stage="play-menu-ready"
+        elseif blocked then stage="waiting-intro"
+        elseif not hud then stage="missing-hud"
+        elseif not facts.hudVisible or not facts.mainVisible then stage="waiting-hud"
+        elseif not inWorld or not re or not rf then stage="waiting-live-character"
+        elseif not physical then stage="waiting-movement"
+        elseif facts.loadedData==false then stage="waiting-player-data"
+        else stage="settling" end
+        local identity=ready and {pg,hud,main,character,root,re,rf} or nil
+        local same=identity~=nil and self.identity~=nil
+        if same then for i,value in ipairs(identity) do if self.identity[i]~=value then same=false;break end end end
+        if not same then self.stableSince=ready and now or nil end
+        self.identity=identity
+        facts.stableSeconds=self.stableSince and now-self.stableSince or 0
+        facts.ready=ready and facts.stableSeconds>=2 or false
+        if facts.ready then stage="ready" end
+        facts.stage=stage
+        if stage~=self.stage then
+            self.stage=stage
+            table.insert(self.events,{at=now,stage=stage,hud=facts.hud,character=facts.character,assets=facts.assets})
+            while #self.events>24 do table.remove(self.events,1) end
+        end
+        self.last=facts
+        self.button=not assetsLoading and candidate and candidate.button or nil
+        return facts
+    end
+    function self:Report()
+        return {current=self:Read(),transitions=table.clone(self.events),
+            note="UI and movement observations, not a proven cause of a failed game-client load."}
+    end
+    return self
+end
+
+    local joinObserver=newJoinObserver(LP,os.clock)
+    local joinReport={bootstrap=env.__StandLabJoinBootstrap,events={},pending=false}
+    local clientErrors,errorListener={},nil
+    local errorCapture="unavailable"
+    pcall(function()
+        local service=game:GetService("LogService")
+        local function capture(message,kind)
+            if kind~=Enum.MessageType.MessageError then return end
+            local text=tostring(message):sub(1,700)
+            local previous=clientErrors[#clientErrors]
+            if previous and previous.message==text then previous.count+=1;previous.at=os.clock();return end
+            table.insert(clientErrors,{at=os.clock(),message=text,count=1})
+            while #clientErrors>12 do table.remove(clientErrors,1) end
+        end
+        local ok,history=pcall(function() return service:GetLogHistory() end)
+        if ok and type(history)=="table" then
+            for i=math.max(1,#history-511),#history do
+                local entry=history[i]
+                if type(entry)=="table" then capture(entry.message,entry.messageType) end
+            end
+        end
+        errorListener=service.MessageOut:Connect(capture)
+        errorCapture=ok and "recent history and live client errors" or "live client errors only"
+    end)
+    env.__StandLabJoinBootstrap=nil
+    local joinToken=0
+    local function joinEvent(kind,fields)
+        table.insert(joinReport.events,{at=os.clock(),kind=kind,fields=fields})
+        while #joinReport.events>24 do table.remove(joinReport.events,1) end
+        local logger=_G.__StandLabSourceV10.LogEvent
+        if logger then logger("join."..kind,fields) end
+    end
+    local function dispatchPlay(button)
+        if type(getconnections)~="function" then return false,"handler-inspection-unavailable" end
+        for _,event in ipairs({"MouseButton1Click","Activated"}) do
+            local ok,connections=pcall(function() return getconnections(button[event]) end)
+            local usable={}
+            if ok and type(connections)=="table" then
+                for _,connection in pairs(connections) do
+                    local read,enabled=pcall(function() return connection.Enabled~=false and connection.Connected~=false end)
+                    if read and enabled then table.insert(usable,connection) end
+                end
+            end
+            if #usable>0 then
+                -- One event per button; let the game's client perform HUD/control setup.
+                for _,connection in ipairs(usable) do
+                    task.spawn(function()
+                        local fired,problem=pcall(function() connection:Fire() end)
+                        joinEvent("play-handler-return",{ok=fired,event=event,error=not fired and tostring(problem) or nil})
+                    end)
+                end
+                return true,event
+            end
+        end
+        return false,"waiting-play-handler"
+    end
+    readyCharacter=function()
+        local facts=joinObserver:Read()
+        return facts.ready,facts.stage=="ready" or facts.stage=="settling"
+    end
+    _G.__StandLabSourceV10.IsGameReady=readyCharacter
+    local function startJoin(data)
+        joinToken+=1
+        local token=joinToken
+        joinPendingData=data
+        joinReport.pending=true
+        local autoPlay=data.enterGame==true or data.resumeFarm==true or data.autoHop==true
+            or data.avoidMovement==true or data.avoidNames==true
+        task.spawn(function()
+            local deadline=os.clock()+90
+            local dispatched=setmetatable({},{__mode="k"})
+            local count,lastStage,lastDispatch=0,nil,-math.huge
+            while alive and SL_POLICY.Alive and token==joinToken and os.clock()<deadline do
+                local facts=joinObserver:Read()
+                if facts.stage~=lastStage then
+                    lastStage=facts.stage
+                    joinEvent("stage",facts)
+                    say("Waiting for game entry: "..facts.stage..".")
+                end
+                if facts.ready then
+                    joinReport.pending=false
+                    joinPendingData=nil
+                    if restoreAvoidance then restoreAvoidance(data) end
+                    if data.resumeFarm then setCollector(true,data.candy==true) end
+                    autoEnabled=data.autoHop==true and canQueue and reloadEnabled and data.resumeFarm==true
+                    autoToggle:Set(autoEnabled,true)
+                    joinEvent("ready",{resumedCollection=data.resumeFarm==true})
+                    say(data.resumeFarm and "Game ready; item collection resumed." or "Game ready. Stand Lab reloaded.")
+                    return
+                end
+                local button=joinObserver.button
+                if autoPlay and button and not dispatched[button] and count<2 and os.clock()-lastDispatch>=1 then
+                    local accepted,reason=dispatchPlay(button)
+                    if accepted then dispatched[button]=true;count+=1;lastDispatch=os.clock() end
+                    if accepted or reason~=joinReport.lastInputReason then
+                        joinReport.lastInputReason=reason
+                        joinEvent("play-input",{accepted=accepted,reason=reason,candidates=facts.playCandidates})
+                    end
+                end
+                task.wait(.5)
+            end
+            if alive and SL_POLICY.Alive and token==joinToken then
+                joinReport.pending=false
+                joinEvent("timeout",joinObserver:Read())
+                say("Game loading is incomplete. Farming and automatic hops stay off. Copy report, retry game entry, or rejoin.")
+            end
+        end)
+    end
+    travel:Button({Title="Retry game entry",Desc="Retry the real Play menu; leaves farming off until the HUD and character are ready.",Icon="refresh-cw",Callback=function()
+        if controller.busy then say("Finish traveling before retrying game entry.");return end
+        local data=joinPendingData or {enterGame=true}
+        data.enterGame=true
+        startJoin(data)
+    end})
+    _G.__StandLabSourceV10.GetJoinReport=function()
+        return {bootstrap=joinReport.bootstrap,current=joinObserver:Report(),pending=joinReport.pending,
+            lastInputReason=joinReport.lastInputReason,events=table.clone(joinReport.events),
+            clientErrorCapture=errorCapture,clientErrors=table.clone(clientErrors)}
+    end
+
     local function hasSelectedItems()
         -- Match the collector's real filters without consuming its boosted-target queue.
         for part, data in pairs(Tracked) do
@@ -28228,21 +28573,13 @@ end
         local data = arrival
         arrival = nil
         idleDelay = math.clamp(tonumber(data.idleDelay) or 15, 5, 60)
-        task.spawn(function()
-            local deadline = os.clock() + 45
-            while alive and not readyCharacter() and os.clock() < deadline do task.wait(0.1) end
-            if not alive then return end
-            if not readyCharacter() then say("Hub reloaded. Character is not ready; collection stays stopped."); return end
-            if restoreAvoidance then restoreAvoidance(data) end
-            if data.resumeFarm then setCollector(true, data.candy == true) end
-            autoEnabled = data.autoHop == true and canQueue and data.resumeFarm == true
-            autoToggle:Set(autoEnabled, true)
-            say(data.resumeFarm and "Stand Lab reloaded; item collection resumed." or "Stand Lab reloaded. Ready.")
-        end)
+        startJoin(data)
     end
     function api:Stop()
         if not alive then return end
         alive, autoEnabled = false, false
+        joinToken+=1;joinReport.pending=false
+        if errorListener then errorListener:Disconnect() end
         if stopAvoidance then stopAvoidance(controller.current and controller.current.started and not controller.current.retrying) end
         controller:Stop()
         failed:Disconnect()
@@ -28255,6 +28592,10 @@ end
             avoidMovement=watch.enabledMovement,avoidUsernames=watch.enabledNames,
             target = current and current.target, action = current and current.kind,
             attempt = current and current.index, recentActivity = table.clone(history)}
+    end
+    _G.__StandLabSourceV10.RejoinWithReload=function()
+        if controller.busy then return true end
+        return controller:Start("rejoin",false)
     end
     Window.Raw.Gui.Destroying:Connect(function() api:Stop() end)
     return api
@@ -28357,9 +28698,13 @@ local function newRollLogCore(header)
             local ok, data = pcall(playerWatch)
             if ok then playerWatchText = log.Format(data):sub(1,12000) end
         end
-        return "STAND LAB v25 — LOCAL SESSION REPORT\n"
+        local joinText="Join observations unavailable."
+        local join=_G.__StandLabSourceV10 and _G.__StandLabSourceV10.GetJoinReport
+        if join then local ok,data=pcall(join);if ok then joinText=log.Format(data):sub(1,18000) end end
+        return "STAND LAB v26 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
+            .. "\n\nGAME ENTRY / HUD / MOVEMENT\n" .. joinText
             .. "\n\nPLAYER WATCH / SERVER AVOIDANCE\n" .. playerWatchText
             .. "\n\nPERFORMANCE / FRAME STALLS\n" .. performanceText
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
@@ -28693,7 +29038,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v25", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v26", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local performance = attachPerformanceRecorder(diagnostics, gui, function()
         local statusState = diagnostics.States.status
@@ -29772,7 +30117,10 @@ end
 
 
 diagnostics.Provider = function()
+    local cachedPlayerGui=playerGui
+    local playerGui=player:FindFirstChildOfClass("PlayerGui") or cachedPlayerGui
     local snapshot = {
+        playerGui={cached=diagnostics.Path(cachedPlayerGui),cachedParent=diagnostics.Path(cachedPlayerGui.Parent),current=diagnostics.Path(playerGui),same=cachedPlayerGui==playerGui},
         config = {item = CONFIG.RollItem, target = CONFIG.TargetStand, maxRolls = CONFIG.MaxRolls, skinMode=CONFIG.SkinMode, keepSkins=CONFIG.TargetSkins},
         runtime = {alive = alive, busy = busy, looping = loopActive, cancelled = cancelled, inFlight = inFlight, rolls = metrics.rolls},
         activeItem = diagnostics.ActiveItem or "<none>",
@@ -30289,7 +30637,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v25 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v26 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
