@@ -15,6 +15,12 @@ local SL_POLICY = {
 do
     local previous = _G.__StandLabSourceV10
     if previous and type(previous.Stop) == "function" then
+        if previous.GetPendingJoinIntent then
+            local ok,intent=pcall(previous.GetPendingJoinIntent)
+            local runtimeEnv=type(getgenv)=="function" and getgenv() or _G
+            if ok and type(intent)=="table" and intent.version==1 and intent.placeId==game.PlaceId
+                and runtimeEnv.__StandLabServerArrival==nil then runtimeEnv.__StandLabServerArrival=intent end
+        end
         pcall(previous.Stop)
     elseif _G.__MethionSellingRuntime then
         warn("[Stand Lab] The original hub is already loaded. Rejoin before using this build so its old auto-sell worker cannot keep running.")
@@ -17125,7 +17131,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV26",
+        Name = "StandLabSourceV27",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -17146,7 +17152,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV26",
+            FolderName = "StandLabSourceV27",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27735,7 +27741,7 @@ end
         if not pendingArrival then
             pendingArrival = {version = 1, placeId = game.PlaceId, resumeFarm = State.Farm == true or State.HalloweenCandyFarm == true,
                 candy = State.HalloweenCandyFarm == true, items = table.clone(Config.FarmOnlyItems or {}), mode = Config.FarmTeleportMode,
-                autoHop = autoEnabled, idleDelay = idleDelay, enterGame = readyCharacter and select(2,readyCharacter()) or false}
+                autoHop = autoEnabled, idleDelay = idleDelay, enterGame = true}
         end
         if captureAvoidance then captureAvoidance() end
         pendingArrival.recent = table.clone(visited)
@@ -27747,7 +27753,7 @@ end
             return
         end
         if not queued then
-            local source = [========[-- Wait for the game's own loading/menu UI before executing the full hub.
+            local source = [========[-- Give initial replication a short head start; diagnostics must remain accessible at the intro.
 repeat task.wait() until game:IsLoaded()
 local env=type(getgenv)=="function" and getgenv() or _G
 if env.__StandLabArrivalStarted then return end
@@ -27787,18 +27793,51 @@ local function newJoinObserver(player, clock)
     end
     local function caption(object)
         if object:IsA("TextButton") or object:IsA("TextLabel") then
-            local text=object.Text:gsub("<[^>]*>",""):lower():gsub("%s+"," ")
+            local text=object.Text:gsub("<[^>]*>",""):gsub("\194\160"," "):lower():gsub("%s+"," "):match("^%s*(.-)%s*$")
             return text
         end
         return ""
     end
     local function textInside(object)
-        local parts={caption(object)}
-        for i,child in ipairs(object:GetDescendants()) do
-            if i>500 then break end
-            if visible(child) then table.insert(parts,caption(child)) end
+        local parts,seen={},{}
+        local function add(child)
+            local text=caption(child)
+            if text~="" and not seen[text] then seen[text]=true;table.insert(parts,text) end
+        end
+        if visible(object) then add(object) end
+        for _,child in ipairs(object:GetDescendants()) do
+            if visible(child) then add(child) end
+            if #parts>=64 then break end
         end
         return table.concat(parts," ")
+    end
+    local function isPlay(button)
+        local texts=textInside(button)
+        if caption(button)=="play" then return true,texts,"own-caption" end
+        for _,child in ipairs(button:GetDescendants()) do
+            if visible(child) and caption(child)=="play" then return true,texts,"child-caption" end
+        end
+        local name=button.Name:lower():gsub("[^%w]","")
+        if texts=="" and (name=="play" or name=="playbutton") then return true,texts,"named-play" end
+        return false,texts,"not-play"
+    end
+    local function handlerCounts(button)
+        local counts={}
+        if type(getconnections)~="function" then return counts,0 end
+        local total=0
+        for _,event in ipairs({"MouseButton1Click","MouseButton1Down","MouseButton1Up","Activated"}) do
+            local ok,connections=pcall(function() return getconnections(button[event]) end)
+            local count=0
+            if ok and type(connections)=="table" then
+                for _,connection in pairs(connections) do
+                    local readEnabled,enabled=pcall(function() return connection.Enabled end)
+                    local readConnected,connected=pcall(function() return connection.Connected end)
+                    if (not readEnabled or enabled~=false) and (not readConnected or connected~=false) then count+=1 end
+                end
+            end
+            counts[event]=count;total+=count
+        end
+        return counts,total
     end
     function self:Read(force)
         local now=clock()
@@ -27817,7 +27856,7 @@ local function newJoinObserver(player, clock)
             hud=path(hud),hudVisible=visible(hud),mainVisible=visible(main),character=path(character),
             rootAnchored=prop(root,"Anchored"),health=prop(humanoid,"Health"),walkSpeed=prop(humanoid,"WalkSpeed"),
             platformStand=prop(humanoid,"PlatformStand"),sit=prop(humanoid,"Sit"),
-            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={}}
+            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={},inputCandidates={},playTextNodes={}}
         pcall(function() facts.loadedAttribute=player:GetAttribute("LOADED") end)
         pcall(function() facts.cameraType=tostring(workspace.CurrentCamera.CameraType);facts.cameraSubject=path(workspace.CurrentCamera.CameraSubject) end)
         local data=player:FindFirstChild("LoadedData")
@@ -27831,12 +27870,11 @@ local function newJoinObserver(player, clock)
                     local descendants=child:GetDescendants()
                     local shown=child:IsA("GuiObject") and visible(child) or false
                     if visible(child) then
-                        for n,object in ipairs(descendants) do
-                            if n>500 then break end
+                        for _,object in ipairs(descendants) do
                             if object:IsA("GuiObject") and visible(object) then shown=true;break end
                         end
                     end
-                    table.insert(facts.screens,{name=child.Name,visible=shown})
+                    table.insert(facts.screens,{name=child.Name,visible=shown,descendantCount=#descendants})
                     if shown then
                         blocked=true
                         local allText=textInside(child)
@@ -27844,20 +27882,29 @@ local function newJoinObserver(player, clock)
                         if done and tonumber(done)<tonumber(total) then
                             assetsLoading=true;facts.assets={loaded=tonumber(done),total=tonumber(total)}
                         end
-                        for n,button in ipairs(descendants) do
-                            if n>500 then break end
-                            if button:IsA("GuiButton") and visible(button) and button.Active then
-                                local label=textInside(button):match("^%s*(.-)%s*$")
-                                if label=="play" or label=="play play" then
+                        for _,button in ipairs(descendants) do
+                            if #facts.playTextNodes<12 and visible(button) and caption(button)=="play" then
+                                table.insert(facts.playTextNodes,{path=path(button),class=button.ClassName,parent=path(button.Parent)})
+                            end
+                            if button:IsA("GuiButton") and visible(button) then
+                                local matched,label,matchReason=isPlay(button)
+                                local interactable=prop(button,"Interactable")
+                                local counts,total=handlerCounts(button)
+                                local row={path=path(button),text=label:sub(1,160),active=prop(button,"Active"),interactable=interactable,
+                                    matched=matched,matchReason=matchReason,handlers=counts}
+                                if #facts.inputCandidates<24 then table.insert(facts.inputCandidates,row)
+                                elseif matched then facts.inputCandidates[24]=row end
+                                -- Active gates Activated; mouse button events can still be bound while Active is false.
+                                if matched and interactable~=false then
                                     local rank=1
                                     local ancestor=button.Parent
-                                    for _=1,3 do
+                                    for _=1,8 do
                                         if not ancestor or ancestor==child then break end
                                         local context=textInside(ancestor)
                                         if context:find("main game",1,true) and not context:find("game modes",1,true) then rank=2;break end
                                         ancestor=ancestor.Parent
                                     end
-                                    table.insert(candidates,{button=button,rank=rank,path=path(button)})
+                                    table.insert(candidates,{button=button,rank=rank,path=path(button),handlers=total})
                                 end
                             end
                         end
@@ -27865,10 +27912,10 @@ local function newJoinObserver(player, clock)
                 end
             end
         end
-        table.sort(candidates,function(a,b) return a.rank>b.rank end)
-        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank}) end
+        table.sort(candidates,function(a,b) return a.rank>b.rank or (a.rank==b.rank and a.handlers>b.handlers) end)
+        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank,handlers=candidate.handlers}) end
         local candidate=candidates[1]
-        if candidates[2] and candidates[2].rank==candidate.rank then candidate=nil end
+        if candidates[2] and candidates[2].rank==candidate.rank and candidates[2].handlers==candidate.handlers then candidate=nil end
         local inWorld=character and living and character:IsDescendantOf(living)
         local physical=humanoid and humanoid.Health>0 and root and not root.Anchored
             and humanoid.WalkSpeed>0 and not humanoid.PlatformStand
@@ -27895,6 +27942,7 @@ local function newJoinObserver(player, clock)
         facts.ready=ready and facts.stableSeconds>=2 or false
         if facts.ready then stage="ready" end
         facts.stage=stage
+        facts.playPhase=candidate and (candidate.rank==2 and "main-game" or "title") or nil
         if stage~=self.stage then
             self.stage=stage
             table.insert(self.events,{at=now,stage=stage,hud=facts.hud,character=facts.character,assets=facts.assets})
@@ -27914,7 +27962,7 @@ end
 local player=game:GetService("Players").LocalPlayer
 while not player do task.wait(.5);player=game:GetService("Players").LocalPlayer end
 local observer=newJoinObserver(player,os.clock)
-local deadline,lastStage=os.clock()+90,nil
+local deadline,lastStage=os.clock()+5,nil
 repeat
     local facts=observer:Read()
     env.__StandLabJoinBootstrap=observer:Report()
@@ -27922,6 +27970,7 @@ repeat
     if facts.ready or facts.stage=="play-menu-ready" then break end
     task.wait(.5)
 until os.clock()>=deadline
+env.__StandLabJoinBootstrap=observer:Report()
 local source=game:HttpGet("https://raw.githubusercontent.com/JeremyInk/stand-lab/main/main.lua")
 assert(type(source)=="string" and #source>0,"Stand Lab download was empty")
 local chunk,problem=loadstring(source)
@@ -28056,18 +28105,51 @@ local function newJoinObserver(player, clock)
     end
     local function caption(object)
         if object:IsA("TextButton") or object:IsA("TextLabel") then
-            local text=object.Text:gsub("<[^>]*>",""):lower():gsub("%s+"," ")
+            local text=object.Text:gsub("<[^>]*>",""):gsub("\194\160"," "):lower():gsub("%s+"," "):match("^%s*(.-)%s*$")
             return text
         end
         return ""
     end
     local function textInside(object)
-        local parts={caption(object)}
-        for i,child in ipairs(object:GetDescendants()) do
-            if i>500 then break end
-            if visible(child) then table.insert(parts,caption(child)) end
+        local parts,seen={},{}
+        local function add(child)
+            local text=caption(child)
+            if text~="" and not seen[text] then seen[text]=true;table.insert(parts,text) end
+        end
+        if visible(object) then add(object) end
+        for _,child in ipairs(object:GetDescendants()) do
+            if visible(child) then add(child) end
+            if #parts>=64 then break end
         end
         return table.concat(parts," ")
+    end
+    local function isPlay(button)
+        local texts=textInside(button)
+        if caption(button)=="play" then return true,texts,"own-caption" end
+        for _,child in ipairs(button:GetDescendants()) do
+            if visible(child) and caption(child)=="play" then return true,texts,"child-caption" end
+        end
+        local name=button.Name:lower():gsub("[^%w]","")
+        if texts=="" and (name=="play" or name=="playbutton") then return true,texts,"named-play" end
+        return false,texts,"not-play"
+    end
+    local function handlerCounts(button)
+        local counts={}
+        if type(getconnections)~="function" then return counts,0 end
+        local total=0
+        for _,event in ipairs({"MouseButton1Click","MouseButton1Down","MouseButton1Up","Activated"}) do
+            local ok,connections=pcall(function() return getconnections(button[event]) end)
+            local count=0
+            if ok and type(connections)=="table" then
+                for _,connection in pairs(connections) do
+                    local readEnabled,enabled=pcall(function() return connection.Enabled end)
+                    local readConnected,connected=pcall(function() return connection.Connected end)
+                    if (not readEnabled or enabled~=false) and (not readConnected or connected~=false) then count+=1 end
+                end
+            end
+            counts[event]=count;total+=count
+        end
+        return counts,total
     end
     function self:Read(force)
         local now=clock()
@@ -28086,7 +28168,7 @@ local function newJoinObserver(player, clock)
             hud=path(hud),hudVisible=visible(hud),mainVisible=visible(main),character=path(character),
             rootAnchored=prop(root,"Anchored"),health=prop(humanoid,"Health"),walkSpeed=prop(humanoid,"WalkSpeed"),
             platformStand=prop(humanoid,"PlatformStand"),sit=prop(humanoid,"Sit"),
-            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={}}
+            remoteEvent=re~=nil,remoteFunction=rf~=nil,roots={},screens={},playCandidates={},inputCandidates={},playTextNodes={}}
         pcall(function() facts.loadedAttribute=player:GetAttribute("LOADED") end)
         pcall(function() facts.cameraType=tostring(workspace.CurrentCamera.CameraType);facts.cameraSubject=path(workspace.CurrentCamera.CameraSubject) end)
         local data=player:FindFirstChild("LoadedData")
@@ -28100,12 +28182,11 @@ local function newJoinObserver(player, clock)
                     local descendants=child:GetDescendants()
                     local shown=child:IsA("GuiObject") and visible(child) or false
                     if visible(child) then
-                        for n,object in ipairs(descendants) do
-                            if n>500 then break end
+                        for _,object in ipairs(descendants) do
                             if object:IsA("GuiObject") and visible(object) then shown=true;break end
                         end
                     end
-                    table.insert(facts.screens,{name=child.Name,visible=shown})
+                    table.insert(facts.screens,{name=child.Name,visible=shown,descendantCount=#descendants})
                     if shown then
                         blocked=true
                         local allText=textInside(child)
@@ -28113,20 +28194,29 @@ local function newJoinObserver(player, clock)
                         if done and tonumber(done)<tonumber(total) then
                             assetsLoading=true;facts.assets={loaded=tonumber(done),total=tonumber(total)}
                         end
-                        for n,button in ipairs(descendants) do
-                            if n>500 then break end
-                            if button:IsA("GuiButton") and visible(button) and button.Active then
-                                local label=textInside(button):match("^%s*(.-)%s*$")
-                                if label=="play" or label=="play play" then
+                        for _,button in ipairs(descendants) do
+                            if #facts.playTextNodes<12 and visible(button) and caption(button)=="play" then
+                                table.insert(facts.playTextNodes,{path=path(button),class=button.ClassName,parent=path(button.Parent)})
+                            end
+                            if button:IsA("GuiButton") and visible(button) then
+                                local matched,label,matchReason=isPlay(button)
+                                local interactable=prop(button,"Interactable")
+                                local counts,total=handlerCounts(button)
+                                local row={path=path(button),text=label:sub(1,160),active=prop(button,"Active"),interactable=interactable,
+                                    matched=matched,matchReason=matchReason,handlers=counts}
+                                if #facts.inputCandidates<24 then table.insert(facts.inputCandidates,row)
+                                elseif matched then facts.inputCandidates[24]=row end
+                                -- Active gates Activated; mouse button events can still be bound while Active is false.
+                                if matched and interactable~=false then
                                     local rank=1
                                     local ancestor=button.Parent
-                                    for _=1,3 do
+                                    for _=1,8 do
                                         if not ancestor or ancestor==child then break end
                                         local context=textInside(ancestor)
                                         if context:find("main game",1,true) and not context:find("game modes",1,true) then rank=2;break end
                                         ancestor=ancestor.Parent
                                     end
-                                    table.insert(candidates,{button=button,rank=rank,path=path(button)})
+                                    table.insert(candidates,{button=button,rank=rank,path=path(button),handlers=total})
                                 end
                             end
                         end
@@ -28134,10 +28224,10 @@ local function newJoinObserver(player, clock)
                 end
             end
         end
-        table.sort(candidates,function(a,b) return a.rank>b.rank end)
-        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank}) end
+        table.sort(candidates,function(a,b) return a.rank>b.rank or (a.rank==b.rank and a.handlers>b.handlers) end)
+        for _,candidate in ipairs(candidates) do table.insert(facts.playCandidates,{path=candidate.path,rank=candidate.rank,handlers=candidate.handlers}) end
         local candidate=candidates[1]
-        if candidates[2] and candidates[2].rank==candidate.rank then candidate=nil end
+        if candidates[2] and candidates[2].rank==candidate.rank and candidates[2].handlers==candidate.handlers then candidate=nil end
         local inWorld=character and living and character:IsDescendantOf(living)
         local physical=humanoid and humanoid.Health>0 and root and not root.Anchored
             and humanoid.WalkSpeed>0 and not humanoid.PlatformStand
@@ -28164,6 +28254,7 @@ local function newJoinObserver(player, clock)
         facts.ready=ready and facts.stableSeconds>=2 or false
         if facts.ready then stage="ready" end
         facts.stage=stage
+        facts.playPhase=candidate and (candidate.rank==2 and "main-game" or "title") or nil
         if stage~=self.stage then
             self.stage=stage
             table.insert(self.events,{at=now,stage=stage,hud=facts.hud,character=facts.character,assets=facts.assets})
@@ -28212,29 +28303,49 @@ end
         local logger=_G.__StandLabSourceV10.LogEvent
         if logger then logger("join."..kind,fields) end
     end
-    local function dispatchPlay(button)
-        if type(getconnections)~="function" then return false,"handler-inspection-unavailable" end
-        for _,event in ipairs({"MouseButton1Click","Activated"}) do
+    local function dispatchPlay(button,attempt,stillCurrent)
+        if type(getconnections)~="function" then return nil,"handler-inspection-unavailable" end
+        local bindings,counts={},{}
+        for _,event in ipairs({"MouseButton1Click","MouseButton1Down","MouseButton1Up","Activated"}) do
             local ok,connections=pcall(function() return getconnections(button[event]) end)
             local usable={}
             if ok and type(connections)=="table" then
                 for _,connection in pairs(connections) do
-                    local read,enabled=pcall(function() return connection.Enabled~=false and connection.Connected~=false end)
-                    if read and enabled then table.insert(usable,connection) end
+                    local readEnabled,enabled=pcall(function() return connection.Enabled end)
+                    local readConnected,connected=pcall(function() return connection.Connected end)
+                    if (not readEnabled or enabled~=false) and (not readConnected or connected~=false) then table.insert(usable,connection) end
                 end
             end
-            if #usable>0 then
-                -- One event per button; let the game's client perform HUD/control setup.
-                for _,connection in ipairs(usable) do
-                    task.spawn(function()
-                        local fired,problem=pcall(function() connection:Fire() end)
-                        joinEvent("play-handler-return",{ok=fired,event=event,error=not fired and tostring(problem) or nil})
-                    end)
-                end
-                return true,event
-            end
+            bindings[event]=usable;counts[event]=#usable
         end
-        return false,"waiting-play-handler"
+        local methods={}
+        if counts.MouseButton1Click>0 then table.insert(methods,"click") end
+        if counts.MouseButton1Down>0 or counts.MouseButton1Up>0 then table.insert(methods,"press-release") end
+        if counts.Activated>0 and button.Active~=false then table.insert(methods,"activated") end
+        if #methods==0 then return nil,"waiting-play-handler" end
+        local method=methods[(attempt-1)%#methods+1]
+        local result={finished=false,method=method,handlers=counts,ok=true}
+        task.spawn(function()
+            local function fire(event,...)
+                for _,connection in ipairs(bindings[event]) do
+                    if not stillCurrent() then return end
+                    local fired,problem=pcall(function(...) return connection:Fire(...) end,...)
+                    if not fired then result.ok=false end
+                    joinEvent("play-handler-return",{ok=fired,event=event,method=method,error=not fired and tostring(problem) or nil})
+                end
+            end
+            if method=="click" then fire("MouseButton1Click")
+            elseif method=="activated" then fire("Activated",nil,1)
+            else
+                local x,y=0,0
+                pcall(function() local pos,size=button.AbsolutePosition,button.AbsoluteSize;x=pos.X+size.X/2;y=pos.Y+size.Y/2 end)
+                fire("MouseButton1Down",x,y)
+                task.wait(.05)
+                fire("MouseButton1Up",x,y)
+            end
+            result.finished=true
+        end)
+        return result,"awaiting-menu-progress"
     end
     readyCharacter=function()
         local facts=joinObserver:Read()
@@ -28250,8 +28361,8 @@ end
             or data.avoidMovement==true or data.avoidNames==true
         task.spawn(function()
             local deadline=os.clock()+90
-            local dispatched=setmetatable({},{__mode="k"})
-            local count,lastStage,lastDispatch=0,nil,-math.huge
+            local phaseState=nil
+            local count,lastStage=0,nil
             while alive and SL_POLICY.Alive and token==joinToken and os.clock()<deadline do
                 local facts=joinObserver:Read()
                 if facts.stage~=lastStage then
@@ -28271,12 +28382,38 @@ end
                     return
                 end
                 local button=joinObserver.button
-                if autoPlay and button and not dispatched[button] and count<2 and os.clock()-lastDispatch>=1 then
-                    local accepted,reason=dispatchPlay(button)
-                    if accepted then dispatched[button]=true;count+=1;lastDispatch=os.clock() end
-                    if accepted or reason~=joinReport.lastInputReason then
+                local phase=facts.playPhase
+                if autoPlay and button and not controller.busy then
+                    if not phaseState or phaseState.button~=button or phaseState.phase~=phase then
+                        if phaseState and phaseState.attempts>0 then
+                            joinEvent("play-progress",{from=phaseState.phase,to=phase,reason="button-or-phase-changed"})
+                        end
+                        phaseState={button=button,phase=phase,attempts=0,nextTry=0,pending=nil}
+                    end
+                    local state=phaseState
+                    local inputReady=not state.pending or state.pending.finished
+                    if inputReady and count<12 and state.attempts<6 and os.clock()>=state.nextTry then
+                        local result,reason=dispatchPlay(button,state.attempts+1,function()
+                            if not alive or not SL_POLICY.Alive or token~=joinToken or controller.busy then return false end
+                            local current=joinObserver:Read(true)
+                            return joinObserver.button==button and current.playPhase==phase and not current.ready
+                        end)
+                        if result then
+                            state.pending=result;state.attempts+=1;count+=1
+                            local retryDelays={2,3,5,8,12,12}
+                            state.nextTry=os.clock()+retryDelays[state.attempts]
+                            joinReport.playAttempt={phase=phase,path=facts.playCandidates[1] and facts.playCandidates[1].path,
+                                attempt=state.attempts,totalAttempts=count,method=result.method,handlers=result.handlers}
+                        else state.nextTry=os.clock()+.5 end
+                        if result or reason~=joinReport.lastInputReason then
                         joinReport.lastInputReason=reason
-                        joinEvent("play-input",{accepted=accepted,reason=reason,candidates=facts.playCandidates})
+                            joinEvent("play-input",{accepted=result~=nil,reason=reason,attempt=state.attempts,phase=phase,
+                                method=result and result.method,handlers=result and result.handlers,candidates=facts.playCandidates})
+                        end
+                    elseif (count>=12 or state.attempts>=6) and not state.exhausted then
+                        state.exhausted=true
+                        joinEvent("play-input-exhausted",{phase=phase,attempts=state.attempts,total=count})
+                        say("Play has not advanced. Entry retries are paused; loading diagnostics are available in Logs.")
                     end
                 end
                 task.wait(.5)
@@ -28297,7 +28434,10 @@ end
     _G.__StandLabSourceV10.GetJoinReport=function()
         return {bootstrap=joinReport.bootstrap,current=joinObserver:Report(),pending=joinReport.pending,
             lastInputReason=joinReport.lastInputReason,events=table.clone(joinReport.events),
-            clientErrorCapture=errorCapture,clientErrors=table.clone(clientErrors)}
+            playAttempt=joinReport.playAttempt,clientErrorCapture=errorCapture,clientErrors=table.clone(clientErrors)}
+    end
+    _G.__StandLabSourceV10.GetPendingJoinIntent=function()
+        return alive and SL_POLICY.Alive and joinPendingData and table.clone(joinPendingData) or nil
     end
 
     local function hasSelectedItems()
@@ -28569,7 +28709,12 @@ end
     end)
     local api = {}
     function api:RestoreArrival()
-        if not arrival then return end
+        if not arrival then
+            local facts=joinObserver:Read()
+            if facts.ready or facts.stage=="settling" then return end
+            startJoin({version=1,placeId=game.PlaceId,enterGame=true})
+            return
+        end
         local data = arrival
         arrival = nil
         idleDelay = math.clamp(tonumber(data.idleDelay) or 15, 5, 60)
@@ -28701,7 +28846,7 @@ local function newRollLogCore(header)
         local joinText="Join observations unavailable."
         local join=_G.__StandLabSourceV10 and _G.__StandLabSourceV10.GetJoinReport
         if join then local ok,data=pcall(join);if ok then joinText=log.Format(data):sub(1,18000) end end
-        return "STAND LAB v26 — LOCAL SESSION REPORT\n"
+        return "STAND LAB v27 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
             .. "\n\nGAME ENTRY / HUD / MOVEMENT\n" .. joinText
@@ -29038,7 +29183,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v26", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v27", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local performance = attachPerformanceRecorder(diagnostics, gui, function()
         local statusState = diagnostics.States.status
@@ -30637,7 +30782,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v26 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v27 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})
