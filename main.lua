@@ -17125,7 +17125,7 @@ function AirflowCompat:CreateWindow(config)
     config = config or {}
     local title = config.Title or "Methion"
     local rawWindow = AirflowLibrary:CreateWindow({
-        Name = "StandLabSourceV24",
+        Name = "StandLabSourceV25",
         Title = title,
         Theme = config.Theme or "Halloween",
         LoadingSubtitle = config.Author or "by Diablo",
@@ -17146,7 +17146,7 @@ function AirflowCompat:CreateWindow(config)
         },
         ConfigurationSaving = {
             Enabled = false,
-            FolderName = "StandLabSourceV24",
+            FolderName = "StandLabSourceV25",
             FileName = "Config",
         },
         Parent = game:GetService("CoreGui"),
@@ -27765,6 +27765,7 @@ end
     local alive, autoEnabled, reloadEnabled, queued = true, false, canQueue, false
     local idleDelay = math.clamp(tonumber(arrival and arrival.idleDelay) or 15, 5, 60)
     local idleSince, pendingArrival, autoToggle, reloadToggle, controller = nil, nil, nil, nil, nil
+    local captureAvoidance,stopAvoidance,restoreAvoidance
     local tab = Window:Tab({Title = "Servers", Icon = "server", Desc = "Travel and item hopping in Stand Lab."})
     local travel = tab:Section({Title = "Travel", Side = "left"})
     local items = tab:Section({Title = "Item hopping", Side = "left"})
@@ -27809,6 +27810,7 @@ end
                 candy = State.HalloweenCandyFarm == true, items = table.clone(Config.FarmOnlyItems or {}), mode = Config.FarmTeleportMode,
                 autoHop = autoEnabled, idleDelay = idleDelay}
         end
+        if captureAvoidance then captureAvoidance() end
         pendingArrival.recent = table.clone(visited)
         local saved, saveError = pcall(saveArrival)
         if not saved then
@@ -27884,7 +27886,10 @@ chunk()
         clearArrival = clearArrival, prepareArrival = prepareArrival, pauseAutomation = pauseAutomation,
         finished = function(automatic)
             idleSince = nil
-            if automatic then autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end end
+            if automatic then
+                autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end
+                if stopAvoidance then stopAvoidance() end
+            end
         end,
         solo = function() return game.JobId == "" or #Players:GetPlayers() <= 1 end,
         fetchPage = function(cursor)
@@ -27909,7 +27914,7 @@ chunk()
                 return
             end
             reloadEnabled = enabled == true
-            if not reloadEnabled then autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end; clearArrival() end
+            if not reloadEnabled then autoEnabled = false; if autoToggle then autoToggle:Set(false, true) end; if stopAvoidance then stopAvoidance() end; clearArrival() end
         end})
     items:Paragraph({Title = "Selected items", Desc = "Uses your Auto-Farm item filters, or the candy collector when it is active. Selling stays off."})
     autoToggle = items:Toggle({Title = "Collect + auto hop", Desc = "Collect selected items, then change servers when none remain.", Value = false,
@@ -27958,6 +27963,248 @@ chunk()
         end
         return false
     end
+    -- STAND_LAB_PLAYER_WATCH
+    -- Measures replicated positions. Evidence describes movement, never proves cheating.
+local function newPlayerWatch(config)
+    local self={players={},events={},latest=nil,enabledMovement=false,enabledNames=false,names={}}
+    local function finite(n) return type(n)=="number" and n==n and math.abs(n)<math.huge end
+    local function accountKey(name) return tostring(name):lower():gsub("^@","") end
+    local function event(record)
+        table.insert(self.events,record)
+        while #self.events>24 do table.remove(self.events,1) end
+        self.latest=record
+    end
+    function self:SetNames(text)
+        local names,seen={},{}
+        for token in tostring(text):gmatch("[^,%s;]+") do
+            local name=accountKey(token)
+            if not name:match("^[%w_]+$") or #name>50 then return false,"Use exact account usernames separated by commas; omit display names and ellipses." end
+            if not seen[name] then table.insert(names,name);seen[name]=true end
+            if #names>100 then return false,"Keep the avoid list to 100 usernames or fewer." end
+        end
+        self.names=seen
+        return true,table.concat(names,", ")
+    end
+    function self:Reset()
+        self.players={}
+        self.latest=nil
+    end
+    function self:Update(now,rows)
+        local present={}
+        local candidate=nil
+        for _,row in ipairs(rows) do
+            if row.id~=config.localId and type(row.name)=="string" then
+                present[row.id]=true
+                if self.enabledNames and self.names[accountKey(row.name)] then
+                    candidate=candidate or {reason="listed-username",username=row.name,userId=row.id,at=now}
+                end
+                local old=self.players[row.id]
+                if not self.enabledMovement or not row.character or not row.root or not row.alive
+                    or not finite(row.x) or not finite(row.y) or not finite(row.z) then
+                    self.players[row.id]=nil
+                elseif not old or old.character~=row.character or old.root~=row.root then
+                    self.players[row.id]={character=row.character,root=row.root,x=row.x,y=row.y,z=row.z,at=now,
+                        graceUntil=now+8,hits={},lastHit=-math.huge}
+                else
+                    local dt=now-old.at
+                    local dx,dy,dz=row.x-old.x,row.y-old.y,row.z-old.z
+                    local distance=math.sqrt(dx*dx+dy*dy+dz*dz)
+                    old.x,old.y,old.z,old.at=row.x,row.y,row.z,now
+                    if dt<=0 or dt>0.75 then
+                        -- Resync after a local freeze, a paused client, or missed samples.
+                        old.hits={};old.confirmed=nil;old.graceUntil=now+2
+                    elseif now>=old.graceUntil then
+                        local speed=distance/dt
+                        old.speed,old.distance=speed,distance
+                        local unusual=distance>=config.jumpStuds or (distance>=20 and speed>=config.speedStuds)
+                        if unusual and now-old.lastHit>=1 then
+                            old.lastHit=now
+                            for i=#old.hits,1,-1 do if now-old.hits[i]>6 then table.remove(old.hits,i) end end
+                            table.insert(old.hits,now)
+                            local record={reason="movement-sample",username=row.name,userId=row.id,at=now,
+                                distanceStuds=distance,observedSpeed=speed,sampleSeconds=dt,confirmations=#old.hits}
+                            event(record)
+                            if #old.hits>=2 then
+                                old.confirmed={reason="repeated-movement-jumps",username=row.name,userId=row.id,at=now,
+                                    distanceStuds=distance,observedSpeed=speed,sampleSeconds=dt,confirmations=#old.hits}
+                            end
+                        end
+                        if old.confirmed and now-old.confirmed.at<=6 then candidate=candidate or old.confirmed end
+                    end
+                end
+            end
+        end
+        for id in pairs(self.players) do if not present[id] then self.players[id]=nil end end
+        return candidate
+    end
+    function self:Report()
+        local tracked=0
+        for _ in pairs(self.players) do tracked+=1 end
+        local names={}
+        for name in pairs(self.names) do table.insert(names,name) end
+        table.sort(names)
+        return {movementEnabled=self.enabledMovement,namesEnabled=self.enabledNames,trackedPlayers=tracked,
+            avoidUsernames=names,
+            latest=self.latest,recentEvents=table.clone(self.events),jumpStuds=config.jumpStuds,speedStuds=config.speedStuds,
+            note="Observed replicated position changes; normal abilities and network corrections can also produce jumps. Requires two samples within six seconds; respawns and long local sampling gaps reset movement evidence."}
+    end
+    return self
+end
+
+    local watchConfig={localId=LP.UserId,jumpStuds=150,speedStuds=300}
+    local watch=newPlayerWatch(watchConfig)
+    local watchSection=tab:Section({Title="Server avoidance",Side="left"})
+    local observedLabel=overview:Paragraph({Title="Player movement",Desc="Avoidance is off."})
+    local movementToggle,usernameToggle,usernamesInput,jumpSlider,speedSlider,cooldownSlider
+    local watchCooldown,lastAvoidHop=60,math.clamp(tonumber(arrival and arrival.avoidLastHop) or 0,0,os.time())
+    local pendingReason=nil
+    local lastWatchDisplay=0
+    local watchLog={}
+    local function recordWatch(event,fields)
+        table.insert(watchLog,{at=os.clock(),event=event,fields=fields})
+        if #watchLog>24 then table.remove(watchLog,1) end
+        local log=_G.__StandLabSourceV10 and _G.__StandLabSourceV10.LogEvent
+        if log then log("server-avoid."..event,fields) end
+    end
+    local function watchCanEnable(toggle)
+        if canQueue and reloadEnabled then return true end
+        say("Enable Reload hub after travel with teleport-queue support before automatic avoidance.")
+        task.defer(function() if toggle then toggle:Set(false,true) end end)
+        return false
+    end
+    watchSection:Paragraph({Title="Optional hop triggers",Desc="Movement needs two unusual samples within six seconds. Respawns and local freezes reset it. Listed usernames match account names, not display names; your current account is ignored."})
+    movementToggle=watchSection:Toggle({Title="Hop on unusual movement",NoSave=true,Value=false,Callback=function(enabled)
+        if enabled and not watchCanEnable(movementToggle) then return end
+        watch.enabledMovement=enabled==true;watch:Reset()
+        if not watch.enabledMovement and not watch.enabledNames then observedLabel:SetDesc("Avoidance is off.") end
+        if captureAvoidance then captureAvoidance() end
+        recordWatch("movement-watch",{enabled=watch.enabledMovement})
+    end})
+    usernamesInput=watchSection:Input({Title="Avoid usernames",Value="",Placeholder="main_username, another_username",Callback=function(text)
+        local ok,normalized=watch:SetNames(text)
+        if not ok then
+            say(normalized)
+            if usernamesInput then usernamesInput:Set(Preferences:Get("Servers/Server avoidance/Avoid usernames",""),true) end
+            return
+        end
+        if usernamesInput then usernamesInput:Set(normalized,true) end
+        if captureAvoidance then captureAvoidance() end
+    end})
+    usernameToggle=watchSection:Toggle({Title="Hop for listed usernames",NoSave=true,Value=false,Callback=function(enabled)
+        if enabled and not watchCanEnable(usernameToggle) then return end
+        if enabled and next(watch.names)==nil then
+            say("Enter at least one exact account username first.")
+            task.defer(function() if usernameToggle then usernameToggle:Set(false,true) end end)
+            return
+        end
+        watch.enabledNames=enabled==true
+        if not watch.enabledMovement and not watch.enabledNames then observedLabel:SetDesc("Avoidance is off.") end
+        if captureAvoidance then captureAvoidance() end
+        recordWatch("username-watch",{enabled=watch.enabledNames})
+    end})
+    jumpSlider=watchSection:Slider({Title="Large jump (studs)",Value={Min=50,Max=500,Default=150},Step=10,Callback=function(value)
+        watchConfig.jumpStuds=math.clamp(tonumber(value) or 150,50,500);watch:Reset()
+        if captureAvoidance then captureAvoidance() end
+    end})
+    speedSlider=watchSection:Slider({Title="Observed speed (studs/sec)",Value={Min=100,Max=1000,Default=300},Step=25,Callback=function(value)
+        watchConfig.speedStuds=math.clamp(tonumber(value) or 300,100,1000);watch:Reset()
+        if captureAvoidance then captureAvoidance() end
+    end})
+    cooldownSlider=watchSection:Slider({Title="Avoidance cooldown (seconds)",Value={Min=15,Max=180,Default=60},Step=5,Callback=function(value)
+        watchCooldown=math.clamp(tonumber(value) or 60,15,180)
+        if captureAvoidance then captureAvoidance() end
+    end})
+    captureAvoidance = function()
+        if pendingArrival then
+            pendingArrival.avoidMovement=watch.enabledMovement
+            pendingArrival.avoidNames=watch.enabledNames
+            pendingArrival.avoidLastHop=lastAvoidHop
+            local names={}
+            for name in pairs(watch.names) do table.insert(names,name) end
+            table.sort(names)
+            pendingArrival.avoidSettings={usernames=table.concat(names,", "),jumpStuds=watchConfig.jumpStuds,speedStuds=watchConfig.speedStuds,cooldown=watchCooldown}
+            pcall(saveArrival)
+        end
+    end
+    stopAvoidance = function(preserveArrival)
+        watch.enabledMovement,watch.enabledNames=false,false
+        watch:Reset()
+        observedLabel:SetDesc("Avoidance is off.")
+        if movementToggle then movementToggle:Set(false,true) end
+        if usernameToggle then usernameToggle:Set(false,true) end
+        if not preserveArrival then captureAvoidance() end
+    end
+    local function watchRows()
+        local rows={}
+        for _,other in ipairs(Players:GetPlayers()) do
+            if other~=LP then
+                local character=other.Character
+                local root=character and character:FindFirstChild("HumanoidRootPart")
+                local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+                local position=root and root.Position
+                table.insert(rows,{id=other.UserId,name=other.Name,character=character,root=root,
+                    alive=humanoid and humanoid.Health>0,x=position and position.X,y=position and position.Y,z=position and position.Z})
+            end
+        end
+        return rows
+    end
+    task.spawn(function()
+        while alive and SL_POLICY.Alive do
+            task.wait(0.25)
+            if not alive or not SL_POLICY.Alive then break end
+            if watch.enabledMovement or watch.enabledNames then
+                local candidate=watch:Update(os.clock(),watchRows())
+                if os.clock()-lastWatchDisplay>=1 then
+                    lastWatchDisplay=os.clock()
+                    local latest=watch.latest
+                    observedLabel:SetDesc(latest and string.format("%s: %.0f studs/sec, %.0f-stud jump (%d confirmations).",latest.username,latest.observedSpeed,latest.distanceStuds,latest.confirmations)
+                        or "Watching loaded player positions and the username list.")
+                end
+                if candidate and not controller.busy and not competingAutomation() and readyCharacter()
+                    and os.time()-lastAvoidHop>=watchCooldown then
+                    if not canQueue or not reloadEnabled then
+                        stopAvoidance();say("Automatic avoidance stopped: hub reload support is unavailable.")
+                    else
+                        local before=lastAvoidHop
+                        lastAvoidHop=os.time()
+                        pendingReason=candidate
+                        recordWatch("hop-trigger",candidate)
+                        say("Avoiding "..candidate.username..": "..candidate.reason..".")
+                        if not controller:Start("hop",true) then lastAvoidHop=before end
+                    end
+                end
+            end
+        end
+    end)
+    restoreAvoidance = function(data)
+        if not canQueue or not reloadEnabled then return end
+        local settings=type(data.avoidSettings)=="table" and data.avoidSettings or {}
+        if type(settings.usernames)=="string" then
+            local ok,normalized=watch:SetNames(settings.usernames)
+            if ok and usernamesInput then usernamesInput:Set(normalized,true) end
+        end
+        watchConfig.jumpStuds=math.clamp(tonumber(settings.jumpStuds) or watchConfig.jumpStuds,50,500)
+        watchConfig.speedStuds=math.clamp(tonumber(settings.speedStuds) or watchConfig.speedStuds,100,1000)
+        watchCooldown=math.clamp(tonumber(settings.cooldown) or watchCooldown,15,180)
+        jumpSlider:Set(watchConfig.jumpStuds,true)
+        speedSlider:Set(watchConfig.speedStuds,true)
+        cooldownSlider:Set(watchCooldown,true)
+        watch.enabledMovement=data.avoidMovement==true
+        watch.enabledNames=data.avoidNames==true and next(watch.names)~=nil
+        movementToggle:Set(watch.enabledMovement,true)
+        usernameToggle:Set(watch.enabledNames,true)
+        watch:Reset()
+    end
+    _G.__StandLabSourceV10.GetPlayerWatchReport=function()
+        local report=watch:Report()
+        report.cooldownSeconds=watchCooldown
+        report.lastAvoidHop=lastAvoidHop
+        report.lastHopReason=pendingReason
+        report.hopActions=table.clone(watchLog)
+        return report
+    end
+
+
     task.spawn(function()
         while alive and SL_POLICY.Alive do
             task.wait(1)
@@ -27986,6 +28233,7 @@ chunk()
             while alive and not readyCharacter() and os.clock() < deadline do task.wait(0.1) end
             if not alive then return end
             if not readyCharacter() then say("Hub reloaded. Character is not ready; collection stays stopped."); return end
+            if restoreAvoidance then restoreAvoidance(data) end
             if data.resumeFarm then setCollector(true, data.candy == true) end
             autoEnabled = data.autoHop == true and canQueue and data.resumeFarm == true
             autoToggle:Set(autoEnabled, true)
@@ -27995,6 +28243,7 @@ chunk()
     function api:Stop()
         if not alive then return end
         alive, autoEnabled = false, false
+        if stopAvoidance then stopAvoidance(controller.current and controller.current.started and not controller.current.retrying) end
         controller:Stop()
         failed:Disconnect()
         started:Disconnect()
@@ -28003,6 +28252,7 @@ chunk()
         local current = controller.current
         return {busy = controller.busy, autoHop = autoEnabled, reloadEnabled = reloadEnabled,
             queueSupported = canQueue, queued = queued, idleDelay = idleDelay, lastStatus = lastStatus,
+            avoidMovement=watch.enabledMovement,avoidUsernames=watch.enabledNames,
             target = current and current.target, action = current and current.kind,
             attempt = current and current.index, recentActivity = table.clone(history)}
     end
@@ -28101,9 +28351,16 @@ local function newRollLogCore(header)
             local ok, result = pcall(function() return log.Performance:Report() end)
             performanceText = ok and log.Format(result):sub(1, 24000) or ("Recorder report failed: " .. tostring(result))
         end
-        return "STAND LAB v24 — LOCAL SESSION REPORT\n"
+        local playerWatchText = "Player avoidance unavailable."
+        local playerWatch = _G.__StandLabSourceV10 and _G.__StandLabSourceV10.GetPlayerWatchReport
+        if playerWatch then
+            local ok, data = pcall(playerWatch)
+            if ok then playerWatchText = log.Format(data):sub(1,12000) end
+        end
+        return "STAND LAB v25 — LOCAL SESSION REPORT\n"
             .. log.Format(log.Header) .. "\nElapsed: " .. string.format("%.3f", os.clock() - log.Started)
             .. "s | discarded events: " .. log.Dropped
+            .. "\n\nPLAYER WATCH / SERVER AVOIDANCE\n" .. playerWatchText
             .. "\n\nPERFORMANCE / FRAME STALLS\n" .. performanceText
             .. "\n\nCURRENT LOCAL SNAPSHOT\n" .. snapshotText
             .. "\n\nLATEST DECISION STATES\n" .. log.Format(log.States):sub(1, 8000)
@@ -28436,7 +28693,7 @@ local function setupStandLabRolls()
     local controls = tab:Section({Title = "Roll controls", Side = "left"})
     local display = tab:Section({Title = "Stand showcase", Side = "right"})
     local status = controls:Paragraph({Title = "Status", Desc = "Choose an item and optional Stand, then start."})
-    local diagnostics = createRollDiagnostics({build = "v24", player = player.Name, placeId = game.PlaceId,
+    local diagnostics = createRollDiagnostics({build = "v25", player = player.Name, placeId = game.PlaceId,
         placeVersion = game.PlaceVersion, protocol = "ReturnStandData / StandData.Skin"}, Window, gui)
     local performance = attachPerformanceRecorder(diagnostics, gui, function()
         local statusState = diagnostics.States.status
@@ -30032,7 +30289,7 @@ do
     })
 
     aboutSection:Paragraph({Title = "Project", Desc = "Stand Lab / Methion Source Edition"})
-    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v24 / Methion v2 engine"})
+    aboutSection:Paragraph({Title = "Version", Desc = "Stand Lab v25 / Methion v2 engine"})
     aboutSection:Paragraph({Title = "Owner / Author", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Interface and Lua Work", Desc = "Diablo"})
     aboutSection:Paragraph({Title = "Credit", Desc = "redikXrbs."})

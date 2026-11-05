@@ -1,6 +1,6 @@
 # Stand Lab
 
-Personal Stand Lab v24 release.
+Personal Stand Lab v25 release.
 
 ## Load
 
@@ -46,6 +46,20 @@ The integrated **Servers** tab replaces the separate Item Serverhop loader:
 
 Travel pauses competing automation. Automatic selling and bulk skill allocation remain off by default. The existing collector and original UI are reused; the separate obfuscated payload is not loaded.
 
+## Optional server avoidance
+
+**Servers → Server avoidance** adds two independent, initially disabled hop rules:
+
+- **Hop on unusual movement** observes other players' loaded character positions four times per second. Two qualifying samples within six seconds trigger travel. Defaults are a jump of at least 150 studs or movement of at least 300 studs/second over at least 20 studs. Counted samples are at least one second apart.
+- **Avoid usernames** accepts comma-, space-, or semicolon-separated account usernames. Turn on **Hop for listed usernames** to leave when any exact listed account is present. Matching ignores case and an optional leading @. Display names and partial names are not used. Your own account is always excluded, so an alt can list your main account.
+- **Avoidance cooldown** defaults to 60 seconds and carries through deliberate server travel. Baselines reset for new characters, changed/missing roots, dead characters, and long local sampling gaps. New baselines receive an eight-second grace period; resuming after a long local gap receives two seconds.
+
+Both rules require **Reload hub after travel** and runner teleport-queue support. They reuse the existing server selector, teleport retry handling and collector continuation. An active Stand roll, candy turn-in, quest/NPC farm, prestige task or sale defers automatic avoidance. Only one travel operation runs at a time. Turning off a rule updates pending continuation; closing the old UI during an already-started teleport preserves the queued rules.
+
+The username list and thresholds autosave; the two active rule toggles do not auto-start from saved preferences. Enabled rules resume only through a deliberate queued travel continuation. Observations and hop reasons are included in **Logs → Copy report**, with bounded history. Sampling uses player roots rather than world scans and makes no HTTP requests until a hop is requested.
+
+Unusual replicated movement is an observation, not proof of cheating: game abilities and network corrections can produce similar jumps. Adjust thresholds or use exact usernames if the rule fires on normal play.
+
 ## Performance diagnostics
 
 Local performance recording is included in **Logs → Copy report**. Keep **Record performance** on, reproduce a spike, and copy the report after the game responds again.
@@ -63,7 +77,7 @@ The v22 retained-Rib correction is preserved: a confirmed Stand result proceeds 
 
 Fresh skin validation before Rokakaka and again before its confirmation remains unchanged. The replacement-character, root, both-remotes and reset-Worthiness checks after Rokakaka remain in place. Servers, item collection, and existing diagnostics are preserved.
 
-Compilation, skin-policy, preference storage/binding, candy dialogue/points and existing rolling regression checks passed. Live game behavior still needs testing in the user's runner. Rejoin before loading a new release to clear previous session state.
+Full-script compilation and movement/name matching, grace/reset, cooldown/continuation, bounded-history and complete server-adapter regression checks passed for v25. The existing rolling, skin-policy, preference and candy code is preserved from the checked v24 release. Live game behavior still needs testing in the user's runner. Rejoin before loading a new release to clear previous session state.
 
 The client teleport calls match those in the inspected hub. Roblox documents asynchronous teleport failure handling in [TeleportService](https://create.roblox.com/docs/reference/engine/classes/TeleportService) and notes that the modern TeleportAsync method is server-only in its [teleport guide](https://create.roblox.com/docs/projects/teleport).
 
